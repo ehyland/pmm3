@@ -16,7 +16,7 @@ pub fn run(allocator: std.mem.Allocator, custom_rc_path: ?[]const u8) !void {
     try ensureBashrcHook(allocator, pmm_home, custom_rc_path);
 
     logging.friendly("Setup complete", .{});
-    logging.info("Shims installed to {s}", .{bin_dir});
+    logging.info("Shims installed to {s}", .{try paths.formatHomeRelative(allocator, bin_dir)});
 }
 
 fn installBinary(source_path: []const u8, target_path: []const u8) !void {
@@ -76,5 +76,6 @@ fn ensureBashrcHook(allocator: std.mem.Allocator, pmm_home: []const u8, custom_r
     defer file.close();
     try file.seekFromEnd(0);
     try file.writeAll(hook);
-    logging.info("Added pmm3 shell hook to {s}", .{bashrc_path});
+
+    logging.info("Added pmm3 shell hook to {s}", .{try paths.formatHomeRelative(allocator, bashrc_path)});
 }

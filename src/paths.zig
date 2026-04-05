@@ -73,3 +73,11 @@ fn trimTrailingSlash(value: []const u8) []const u8 {
     while (end > 0 and value[end - 1] == '/') : (end -= 1) {}
     return value[0..end];
 }
+
+pub fn formatHomeRelative(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
+    const home = std.process.getEnvVarOwned(allocator, "HOME") catch return try allocator.dupe(u8, path);
+    if (std.mem.startsWith(u8, path, home)) {
+        return try std.fmt.allocPrint(allocator, "~{s}", .{path[home.len..]});
+    }
+    return try allocator.dupe(u8, path);
+}
