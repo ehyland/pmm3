@@ -119,13 +119,13 @@ fn fetchLatestBunRelease(allocator: std.mem.Allocator) !types.PackageManagerSpec
 }
 
 fn getBunReleaseTarget(allocator: std.mem.Allocator) ![]const u8 {
-    const os_name = switch (builtin.os.tag) {
+    const os_name: []const u8 = switch (builtin.os.tag) {
         .macos => "darwin",
         .linux => "linux",
         else => return error.UnsupportedTarget,
     };
 
-    var arch_name = switch (builtin.cpu.arch) {
+    var arch_name: []const u8 = switch (builtin.cpu.arch) {
         .aarch64 => "aarch64",
         .x86_64 => "x64",
         else => return error.UnsupportedTarget,
@@ -334,5 +334,5 @@ test "requires matching project spec for package manager commands" {
     try std.testing.expect(requiresMatchingProjectSpec(&.{ "bun", "publish" }));
     try std.testing.expect(!requiresMatchingProjectSpec(&.{ "bun", "run", "dev" }));
     try std.testing.expect(!requiresMatchingProjectSpec(&.{ "bun", "x", "tsc" }));
-    try std.testing.expect(!requiresMatchingProjectSpec(&.{ "bun" }));
+    try std.testing.expect(!requiresMatchingProjectSpec(&.{"bun"}));
 }
