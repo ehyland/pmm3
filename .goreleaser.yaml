@@ -6,6 +6,7 @@ before:
   hooks:
     - zig build test
     - zig build
+    - bun install
     - bun test
 
 builds:
