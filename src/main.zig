@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
 const logging = @import("logging.zig");
+const bun = @import("bun.zig");
 const package_json = @import("package_json.zig");
 const paths = @import("paths.zig");
 const process_utils = @import("process_utils.zig");
@@ -9,16 +10,17 @@ const setup = @import("setup.zig");
 const spec = @import("spec.zig");
 const types = @import("types.zig");
 
-const github_latest_release_api = "https://api.github.com/repos/ehyland/pmm3/releases/latest";
+const github_releases_api = "https://api.github.com/repos/ehyland/pmm3/releases?per_page=100";
 
 const GitHubReleaseAsset = struct {
     name: []const u8,
     browser_download_url: []const u8,
 };
 
-const GitHubLatestRelease = struct {
+const GitHubRelease = struct {
     tag_name: []const u8,
-    assets: []GitHubReleaseAsset,
+    draft: bool = false,
+    assets: []const GitHubReleaseAsset,
 };
 
 const RegistryManifest = struct {
@@ -29,6 +31,11 @@ const PmmRelease = struct {
     version: []const u8,
     asset_name: []const u8,
     download_url: []const u8,
+};
+
+const PackageSource = struct {
+    registry_package_name: []const u8,
+    tarball_package_name: []const u8,
 };
 
 const RequestHeaders = []const std.http.Header;
@@ -186,7 +193,7 @@ fn commandUpdateSelf(allocator: std.mem.Allocator) !void {
 
     if (spec.parseVersion(current_version)) |current| {
         const latest_version = try spec.parseVersion(latest.version);
-        if (compareVersions(current, latest_version) >= 0) {
+        if (spec.compareVersions(current, latest_version) >= 0) {
             logging.info("pmm3 is already on the latest version {s}", .{latest.version});
             return;
         }
@@ -256,6 +263,8 @@ fn runPackageManager(
         if (!std.mem.eql(u8, configured.spec.name, shim.package_manager_name)) {
             if (paths.ignoreSpecMismatch(allocator)) {
                 found = null;
+            } else if (spec.isNativePackageManager(shim.package_manager_name) and !bun.requiresMatchingProjectSpec(argv)) {
+                found = null;
             } else {
                 const cwd = try std.process.getCwdAlloc(allocator);
                 const relative = try std.fs.path.relative(allocator, cwd, configured.package_json_path);
@@ -267,26 +276,27 @@ fn runPackageManager(
     }
 
     // If no project-level spec exists, fall back to the cached global default.
-    var package_spec = if (found) |configured| configured.spec else try getDefaultSpec(allocator, shim.package_manager_name);
-
-    if (std.mem.eql(u8, package_spec.name, "yarn")) {
-        const parsed = try spec.parseVersion(package_spec.version);
-        if (parsed.major >= 2) {
-            package_spec = try getDefaultSpec(allocator, shim.package_manager_name);
-        }
-    }
+    const package_spec = if (found) |configured| configured.spec else try getDefaultSpec(allocator, shim.package_manager_name);
 
     _ = try installPackageManager(allocator, package_spec, false);
     const executable_path = try getExecutablePath(allocator, package_spec, shim.executable_name);
 
-    // Package managers are still Node-distributed CLIs, so dispatch through `node`.
-    const child_argv = try allocator.alloc([]const u8, argv.len + 1);
-    child_argv[0] = "node";
-    child_argv[1] = executable_path;
+    const uses_node_runtime = !spec.isNativePackageManager(shim.package_manager_name);
+    const child_argv = try allocator.alloc([]const u8, argv.len + @intFromBool(uses_node_runtime));
 
-    var index: usize = 1;
-    while (index < argv.len) : (index += 1) {
-        child_argv[index + 1] = argv[index];
+    if (uses_node_runtime) {
+        child_argv[0] = "node";
+        child_argv[1] = executable_path;
+        var index: usize = 1;
+        while (index < argv.len) : (index += 1) {
+            child_argv[index + 1] = argv[index];
+        }
+    } else {
+        child_argv[0] = executable_path;
+        var index: usize = 1;
+        while (index < argv.len) : (index += 1) {
+            child_argv[index] = argv[index];
+        }
     }
 
     var env_map = try std.process.getEnvMap(allocator);
@@ -316,8 +326,14 @@ fn getRequestedOrLatestVersion(
 }
 
 fn getLatestVersion(allocator: std.mem.Allocator, package_manager_name: []const u8) !types.PackageManagerSpec {
+    if (spec.isNativePackageManager(package_manager_name)) {
+        return try bun.getLatestVersion(allocator);
+    }
+
     const registry = try paths.getRegistry(allocator);
-    const manifest_url = try std.fmt.allocPrint(allocator, "{s}/{s}/latest", .{ registry, package_manager_name });
+    const package_source = try resolvePackageSource(package_manager_name, null);
+    const manifest_package_name = try encodePackageNameForRegistryPath(allocator, package_source.registry_package_name);
+    const manifest_url = try std.fmt.allocPrint(allocator, "{s}/{s}/latest", .{ registry, manifest_package_name });
     const result = try fetchUrlToMemory(allocator, manifest_url, &default_request_headers);
 
     const manifest = try std.json.parseFromSliceLeaky(RegistryManifest, allocator, result, .{
@@ -327,6 +343,55 @@ fn getLatestVersion(allocator: std.mem.Allocator, package_manager_name: []const 
     const version = std.mem.trim(u8, manifest.version, " \t\r\n");
     _ = try spec.parseVersion(version);
     return .{ .name = package_manager_name, .version = version };
+}
+
+fn resolvePackageSource(package_manager_name: []const u8, version: ?[]const u8) !PackageSource {
+    if (!std.mem.eql(u8, package_manager_name, "yarn")) {
+        return .{
+            .registry_package_name = package_manager_name,
+            .tarball_package_name = package_manager_name,
+        };
+    }
+
+    const uses_cli_dist = if (version) |resolved_version| blk: {
+        const parsed = try spec.parseVersion(resolved_version);
+        break :blk parsed.major >= 2;
+    } else true;
+
+    if (uses_cli_dist) {
+        return .{
+            .registry_package_name = "@yarnpkg/cli-dist",
+            .tarball_package_name = "cli-dist",
+        };
+    }
+
+    return .{
+        .registry_package_name = "yarn",
+        .tarball_package_name = "yarn",
+    };
+}
+
+fn encodePackageNameForRegistryPath(allocator: std.mem.Allocator, package_name: []const u8) ![]const u8 {
+    const slash_count = std.mem.count(u8, package_name, "/");
+    if (slash_count != 0) {
+        const extra_bytes = slash_count * 2;
+        const encoded = try allocator.alloc(u8, package_name.len + extra_bytes);
+
+        var write_index: usize = 0;
+        for (package_name) |char| {
+            if (char == '/') {
+                @memcpy(encoded[write_index .. write_index + 3], "%2F");
+                write_index += 3;
+            } else {
+                encoded[write_index] = char;
+                write_index += 1;
+            }
+        }
+
+        return encoded;
+    }
+
+    return package_name;
 }
 
 fn getDefaultSpec(allocator: std.mem.Allocator, package_manager_name: []const u8) !types.PackageManagerSpec {
@@ -363,23 +428,59 @@ fn updateDefaultVersion(allocator: std.mem.Allocator, package_spec: types.Packag
 
 fn fetchLatestPmmRelease(allocator: std.mem.Allocator) !PmmRelease {
     const asset_name = try getCurrentReleaseAssetName(allocator);
-    const result = try fetchUrlToMemory(allocator, github_latest_release_api, &github_api_headers);
+    const result = try fetchUrlToMemory(allocator, github_releases_api, &github_api_headers);
 
-    const parsed = try std.json.parseFromSlice(GitHubLatestRelease, allocator, result, .{ .ignore_unknown_fields = true });
+    const parsed = try std.json.parseFromSlice([]GitHubRelease, allocator, result, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
 
-    for (parsed.value.assets) |asset| {
-        if (std.mem.eql(u8, asset.name, asset_name)) {
-            return .{
-                .version = try allocator.dupe(u8, normalizeReleaseVersion(parsed.value.tag_name)),
-                .asset_name = try allocator.dupe(u8, asset.name),
-                .download_url = try allocator.dupe(u8, asset.browser_download_url),
+    return selectLatestRelease(allocator, parsed.value, asset_name);
+}
+
+fn selectLatestRelease(
+    allocator: std.mem.Allocator,
+    releases: []const GitHubRelease,
+    asset_name: []const u8,
+) !PmmRelease {
+    var best_release: ?struct {
+        version: spec.Version,
+        release: GitHubRelease,
+        asset: GitHubReleaseAsset,
+    } = null;
+
+    for (releases) |release| {
+        if (release.draft) continue;
+
+        const normalized_version = normalizeReleaseVersion(release.tag_name);
+        const parsed_version = spec.parseVersion(normalized_version) catch continue;
+        const asset = findReleaseAsset(release.assets, asset_name) orelse continue;
+
+        if (best_release == null or spec.compareVersions(parsed_version, best_release.?.version) > 0) {
+            best_release = .{
+                .version = parsed_version,
+                .release = release,
+                .asset = asset,
             };
         }
     }
 
-    logging.userErrorFmt("Latest release does not contain asset {s}", .{asset_name});
+    if (best_release) |selected| {
+        return .{
+            .version = try allocator.dupe(u8, normalizeReleaseVersion(selected.release.tag_name)),
+            .asset_name = try allocator.dupe(u8, selected.asset.name),
+            .download_url = try allocator.dupe(u8, selected.asset.browser_download_url),
+        };
+    }
+
+    logging.userErrorFmt("Unable to find a published release with asset {s}", .{asset_name});
     return error.MissingReleaseAsset;
+}
+
+fn findReleaseAsset(assets: []const GitHubReleaseAsset, expected_name: []const u8) ?GitHubReleaseAsset {
+    for (assets) |asset| {
+        if (std.mem.eql(u8, asset.name, expected_name)) return asset;
+    }
+
+    return null;
 }
 
 fn getCurrentReleaseAssetName(allocator: std.mem.Allocator) ![]const u8 {
@@ -404,16 +505,6 @@ fn normalizeReleaseVersion(raw_version: []const u8) []const u8 {
     }
 
     return raw_version;
-}
-
-fn compareVersions(left: spec.Version, right: spec.Version) i8 {
-    if (left.major < right.major) return -1;
-    if (left.major > right.major) return 1;
-    if (left.minor < right.minor) return -1;
-    if (left.minor > right.minor) return 1;
-    if (left.patch < right.patch) return -1;
-    if (left.patch > right.patch) return 1;
-    return 0;
 }
 
 fn createTempDir(allocator: std.mem.Allocator) ![]const u8 {
@@ -534,9 +625,112 @@ test "normalize release version trims leading v" {
 }
 
 test "compare versions orders semver values" {
-    try std.testing.expect(compareVersions(try spec.parseVersion("1.2.3"), try spec.parseVersion("1.2.4")) < 0);
-    try std.testing.expect(compareVersions(try spec.parseVersion("2.0.0"), try spec.parseVersion("1.9.9")) > 0);
-    try std.testing.expectEqual(@as(i8, 0), compareVersions(try spec.parseVersion("3.4.5"), try spec.parseVersion("3.4.5")));
+    try std.testing.expect(spec.compareVersions(try spec.parseVersion("1.2.3"), try spec.parseVersion("1.2.4")) < 0);
+    try std.testing.expect(spec.compareVersions(try spec.parseVersion("2.0.0"), try spec.parseVersion("1.9.9")) > 0);
+    try std.testing.expectEqual(@as(i8, 0), spec.compareVersions(try spec.parseVersion("3.4.5"), try spec.parseVersion("3.4.5")));
+}
+
+test "fetchLatestPmmRelease selection prefers highest semver release" {
+    const asset_name = "pmm3-linux-x64.tar.gz";
+    const releases = [_]GitHubRelease{
+        .{
+            .tag_name = "v1.2.3",
+            .assets = &.{.{
+                .name = asset_name,
+                .browser_download_url = "https://example.com/v1.2.3.tar.gz",
+            }},
+        },
+        .{
+            .tag_name = "v1.2.4-alpha.2",
+            .assets = &.{.{
+                .name = asset_name,
+                .browser_download_url = "https://example.com/v1.2.4-alpha.2.tar.gz",
+            }},
+        },
+        .{
+            .tag_name = "v1.2.4-alpha.1",
+            .assets = &.{.{
+                .name = asset_name,
+                .browser_download_url = "https://example.com/v1.2.4-alpha.1.tar.gz",
+            }},
+        },
+    };
+
+    const selected = try selectLatestRelease(std.testing.allocator, &releases, asset_name);
+    defer {
+        std.testing.allocator.free(selected.version);
+        std.testing.allocator.free(selected.asset_name);
+        std.testing.allocator.free(selected.download_url);
+    }
+
+    try std.testing.expectEqualStrings("1.2.4-alpha.2", selected.version);
+    try std.testing.expectEqualStrings("https://example.com/v1.2.4-alpha.2.tar.gz", selected.download_url);
+}
+
+test "fetchLatestPmmRelease selection prefers stable over same core prerelease" {
+    const asset_name = "pmm3-linux-x64.tar.gz";
+    const releases = [_]GitHubRelease{
+        .{
+            .tag_name = "v1.2.4-alpha.3",
+            .assets = &.{.{
+                .name = asset_name,
+                .browser_download_url = "https://example.com/v1.2.4-alpha.3.tar.gz",
+            }},
+        },
+        .{
+            .tag_name = "v1.2.4",
+            .assets = &.{.{
+                .name = asset_name,
+                .browser_download_url = "https://example.com/v1.2.4.tar.gz",
+            }},
+        },
+    };
+
+    const selected = try selectLatestRelease(std.testing.allocator, &releases, asset_name);
+    defer {
+        std.testing.allocator.free(selected.version);
+        std.testing.allocator.free(selected.asset_name);
+        std.testing.allocator.free(selected.download_url);
+    }
+
+    try std.testing.expectEqualStrings("1.2.4", selected.version);
+}
+
+test "fetchLatestPmmRelease selection skips drafts and missing assets" {
+    const asset_name = "pmm3-linux-x64.tar.gz";
+    const releases = [_]GitHubRelease{
+        .{
+            .tag_name = "v9.9.9-alpha.1",
+            .draft = true,
+            .assets = &.{.{
+                .name = asset_name,
+                .browser_download_url = "https://example.com/draft.tar.gz",
+            }},
+        },
+        .{
+            .tag_name = "v1.2.4-alpha.1",
+            .assets = &.{.{
+                .name = "pmm3-darwin-x64.tar.gz",
+                .browser_download_url = "https://example.com/darwin.tar.gz",
+            }},
+        },
+        .{
+            .tag_name = "v1.2.3",
+            .assets = &.{.{
+                .name = asset_name,
+                .browser_download_url = "https://example.com/v1.2.3.tar.gz",
+            }},
+        },
+    };
+
+    const selected = try selectLatestRelease(std.testing.allocator, &releases, asset_name);
+    defer {
+        std.testing.allocator.free(selected.version);
+        std.testing.allocator.free(selected.asset_name);
+        std.testing.allocator.free(selected.download_url);
+    }
+
+    try std.testing.expectEqualStrings("1.2.3", selected.version);
 }
 
 fn installPackageManager(
@@ -544,20 +738,32 @@ fn installPackageManager(
     package_spec: types.PackageManagerSpec,
     skip_cache: bool,
 ) !bool {
+    if (spec.isNativePackageManager(package_spec.name)) {
+        return bun.installPackageManager(allocator, package_spec, skip_cache);
+    }
+
+    const install_path = try paths.getInstallPath(allocator, package_spec);
+    const temp_dir = try createTempDir(allocator);
+    defer cleanupTempDir(allocator, temp_dir);
+
     const package_json_path = try paths.getInstallPackageJsonPath(allocator, package_spec);
 
     if (!skip_cache and (try paths.readFileIfPresent(allocator, package_json_path)) != null) {
         return true;
     }
 
-    const install_path = try paths.getInstallPath(allocator, package_spec);
+    const resolved_version = try spec.getVersionCore(package_spec.version);
+    const package_source = try resolvePackageSource(package_spec.name, package_spec.version);
     const tarball_url = try std.fmt.allocPrint(
         allocator,
         "{s}/{s}/-/{s}-{s}.tgz",
-        .{ try paths.getRegistry(allocator), package_spec.name, package_spec.name, package_spec.version },
+        .{
+            try paths.getRegistry(allocator),
+            package_source.registry_package_name,
+            package_source.tarball_package_name,
+            resolved_version,
+        },
     );
-    const temp_dir = try createTempDir(allocator);
-    defer cleanupTempDir(allocator, temp_dir);
     const archive_path = try std.fs.path.join(allocator, &.{ temp_dir, "package.tgz" });
 
     logging.friendly("Installing {s}@{s}", .{ package_spec.name, package_spec.version });
@@ -629,6 +835,37 @@ fn ensureSuccessfulResponse(url: []const u8, status: std.http.Status) !void {
     return error.CommandFailed;
 }
 
+test "resolvePackageSource uses cli-dist for latest yarn lookup" {
+    const source = try resolvePackageSource("yarn", null);
+    try std.testing.expectEqualStrings("@yarnpkg/cli-dist", source.registry_package_name);
+    try std.testing.expectEqualStrings("cli-dist", source.tarball_package_name);
+}
+
+test "resolvePackageSource keeps legacy yarn for v1" {
+    const source = try resolvePackageSource("yarn", "1.22.22");
+    try std.testing.expectEqualStrings("yarn", source.registry_package_name);
+    try std.testing.expectEqualStrings("yarn", source.tarball_package_name);
+}
+
+test "resolvePackageSource uses cli-dist for yarn 2 plus" {
+    const source = try resolvePackageSource("yarn", "4.1.0");
+    try std.testing.expectEqualStrings("@yarnpkg/cli-dist", source.registry_package_name);
+    try std.testing.expectEqualStrings("cli-dist", source.tarball_package_name);
+}
+
+test "resolvePackageSource uses cli-dist for yarn 2 plus with sha suffix" {
+    const source = try resolvePackageSource("yarn", "3.2.3+sha224.953c8233f7a92884eee2de69a1b92d1f2ec1655e66d08071ba9a02fa");
+    try std.testing.expectEqualStrings("@yarnpkg/cli-dist", source.registry_package_name);
+    try std.testing.expectEqualStrings("cli-dist", source.tarball_package_name);
+}
+
+test "encodePackageNameForRegistryPath escapes scoped packages" {
+    const encoded = try encodePackageNameForRegistryPath(std.testing.allocator, "@yarnpkg/cli-dist");
+    defer if (!std.mem.eql(u8, encoded, "@yarnpkg/cli-dist")) std.testing.allocator.free(encoded);
+
+    try std.testing.expectEqualStrings("@yarnpkg%2Fcli-dist", encoded);
+}
+
 test "findExtractedBinary walks nested directories" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -654,6 +891,10 @@ fn getExecutablePath(
     package_spec: types.PackageManagerSpec,
     executable_name: []const u8,
 ) ![]const u8 {
+    if (spec.isNativePackageManager(package_spec.name)) {
+        return try bun.getExecutablePath(allocator, package_spec, executable_name);
+    }
+
     const package_json_path = try paths.getInstallPackageJsonPath(allocator, package_spec);
     const relative_path = (try package_json.readPackageExecutablePath(allocator, package_json_path, executable_name)) orelse {
         return error.CommandFailed;

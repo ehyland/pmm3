@@ -1,10 +1,12 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { ShellError, TEST_HOME, callAndCatch, cleanup, human, loadPackageJson, setupTestProject, type TestProject } from './helpers';
 
 const VERSION_RX = /(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)/;
 const SPEC_RX =
   /(?<name>(pnpm|npm|yarn))@(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)/;
+
+setDefaultTimeout(30_000)
 
 afterAll(async () => {
   await cleanup();
@@ -63,6 +65,34 @@ describe('setup and usage', () => {
         const result = await human(`${name} -v`, { cwd: testProject.projectPath, stdOutOnly: true });
         expect(result.trim()).toEqual(version);
       }))
+    })
+
+    it('honors yarn 2+ packageManager specs directly', async () => {
+      const testProject = await setupTestProject({
+        subDir: 'yarn/4.10.3',
+        packageManager: 'yarn@4.10.3',
+      });
+
+      const result = await human('yarn -v', {
+        cwd: testProject.projectPath,
+        stdOutOnly: true,
+      });
+
+      expect(result.trim()).toEqual('4.10.3');
+    })
+
+    it('honors yarn packageManager specs with sha suffixes', async () => {
+      const testProject = await setupTestProject({
+        subDir: 'yarn/3.2.3-sha',
+        packageManager: 'yarn@3.2.3+sha224.953c8233f7a92884eee2de69a1b92d1f2ec1655e66d08071ba9a02fa',
+      });
+
+      const result = await human('yarn -v', {
+        cwd: testProject.projectPath,
+        stdOutOnly: true,
+      });
+
+      expect(result.trim()).toEqual('3.2.3');
     })
   });
 
@@ -144,11 +174,18 @@ describe('setup and usage', () => {
     describe('when called in a directory without pm spec', () => {
       let testProject: TestProject;
       let result: string;
+      let yarnProject: TestProject;
+      let yarnResult: string;
 
       beforeAll(async () => {
         testProject = await setupTestProject({ subDir: 'not-configured' });
         result = await human(`pmm3 pin pnpm .`, {
           cwd: testProject.projectPath,
+        });
+
+        yarnProject = await setupTestProject({ subDir: 'yarn/pin-latest' });
+        yarnResult = await human(`pmm3 pin yarn .`, {
+          cwd: yarnProject.projectPath,
         });
       });
 
@@ -161,6 +198,15 @@ describe('setup and usage', () => {
         ).toBeGreaterThanOrEqual(7);
       });
 
+      it('pins yarn using a modern latest release', () => {
+        const messageRx = new RegExp(`🎁  Pinned ${SPEC_RX.source}`);
+        expect(yarnResult).toMatch(messageRx);
+        expect(messageRx.exec(yarnResult)?.groups?.name).toBe('yarn');
+        expect(
+          Number(messageRx.exec(yarnResult)?.groups?.major)
+        ).toBeGreaterThanOrEqual(2);
+      });
+
       it('writes packageManager field', async () => {
         const { packageManager } = await loadPackageJson(
           testProject.packageFilePath
@@ -171,6 +217,16 @@ describe('setup and usage', () => {
 
         expect(match.groups?.name).toBe('pnpm');
         expect(Number(match.groups?.major)).toBeGreaterThanOrEqual(7);
+      });
+
+      it('writes a modern yarn packageManager field', async () => {
+        const { packageManager } = await loadPackageJson(
+          yarnProject.packageFilePath
+        );
+
+        const match = /^yarn@(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)$/.exec(packageManager)!;
+
+        expect(Number(match.groups?.major)).toBeGreaterThanOrEqual(2);
       });
     });
 
@@ -210,6 +266,7 @@ describe('setup and usage', () => {
       });
       result = await human(`yarn -v`, {
         cwd: testProject.projectPath,
+        stdOutOnly: true
       });
     });
 

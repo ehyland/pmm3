@@ -81,8 +81,36 @@ The shell hook added to `~/.bashrc` ensures `PMM3_HOME` defaults to `~/.pmm3` an
 
 Release assets are expected to follow the naming convention `pmm3-<os>-<arch>.tar.gz`, for example `pmm3-darwin-arm64.tar.gz`, and each archive must contain a `pmm3` executable.
 
+## Releases
+
+Alpha releases are driven by git tags and published through GitHub Actions.
+
+To create and push the next prerelease tag locally:
+
+```bash
+./create_prerelease.sh
+```
+
+The script:
+
+- runs `zig build test`
+- runs `bun test`
+- computes the next prerelease tag from the latest `v*` tag
+- creates and pushes the tag after confirmation
+
+If the latest tag is already a prerelease, the script increments that prerelease number.
+If the latest tag is stable, the script increments the patch version and starts `alpha.1`.
+
+Pushing a `v*` tag triggers `.github/workflows/release.yml`, which runs GoReleaser to:
+
+- run the test commands before packaging
+- build the Zig release binaries for macOS and Linux
+- publish `pmm3-darwin-arm64.tar.gz`, `pmm3-darwin-x64.tar.gz`, `pmm3-linux-arm64.tar.gz`, and `pmm3-linux-x64.tar.gz`
+- upload matching SHA256 checksum files to the GitHub Release for that tag
+
 ## Notes
 
 - Package manager archives are stored under `$PMM3_HOME/installed-versions/<name>-<version>`.
 - Default fallback versions are stored under `$PMM3_HOME/installed-versions/.defaults/<name>-version`.
-- `yarn@2+` project specs fall back to the default installed yarn version, preserving the original project behavior around Yarn Berry projects.
+- Latest Yarn resolution and installs for `yarn@2+` use `@yarnpkg/cli-dist` under the hood.
+- `packageManager` specs may include a `+sha...` suffix, such as `yarn@3.2.3+sha224...`; pmm3 preserves the suffix but does not validate it.

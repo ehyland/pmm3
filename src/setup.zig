@@ -2,7 +2,7 @@ const std = @import("std");
 const logging = @import("logging.zig");
 const paths = @import("paths.zig");
 
-const shim_names = [_][]const u8{ "npm", "npx", "pnpm", "pnpx", "yarn" };
+const shim_names = [_][]const u8{ "npm", "npx", "pnpm", "pnpx", "yarn", "bun", "bunx" };
 
 pub fn run(allocator: std.mem.Allocator, custom_rc_path: ?[]const u8) !void {
     const self_exe = try std.fs.selfExePathAlloc(allocator);

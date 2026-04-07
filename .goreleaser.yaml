@@ -1,0 +1,43 @@
+version: 2
+
+project_name: pmm3
+
+before:
+  hooks:
+    - zig build test
+    - zig build
+    - bun test
+
+builds:
+  - id: pmm3
+    builder: zig
+    binary: pmm3
+    targets:
+      - aarch64-macos
+      - x86_64-macos
+      - aarch64-linux-gnu
+      - x86_64-linux-gnu
+    flags:
+      - -Doptimize=ReleaseSafe
+      - -Dversion={{ .Version }}
+
+archives:
+  - id: release-archives
+    ids:
+      - pmm3
+    formats:
+      - tar.gz
+    name_template: >-
+      pmm3-{{ if eq .Os "darwin" }}darwin{{ else }}{{ .Os }}{{ end }}-{{ if eq .Arch "amd64" }}x64{{ else if eq .Arch "arm64" }}arm64{{ else }}{{ .Arch }}{{ end }}
+    files:
+      - none*
+
+checksum:
+  algorithm: sha256
+  split: true
+
+source:
+  enabled: false
+
+release:
+  prerelease: auto
