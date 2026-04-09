@@ -40,5 +40,6 @@ checksum:
 source:
   enabled: false
 
-release:
-  prerelease: auto
+# # uncomment when project is stable
+# release:
+#   prerelease: auto
