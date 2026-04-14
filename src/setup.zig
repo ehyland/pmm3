@@ -21,10 +21,8 @@ pub fn run(allocator: std.mem.Allocator, custom_rc_path: ?[]const u8) !void {
 
 fn installBinary(source_path: []const u8, target_path: []const u8) !void {
     if (std.mem.eql(u8, source_path, target_path)) {
-        // If setup is run from the installed location, only normalize permissions.
-        const file = try std.fs.openFileAbsolute(target_path, .{ .mode = .read_write });
-        defer file.close();
-        try file.chmod(0o755);
+        // Avoid reopening the currently executing binary for write access.
+        // On macOS that can fail with FileBusy during first install.
         return;
     }
 

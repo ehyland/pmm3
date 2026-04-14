@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const http = @import("http.zig");
 const logging = @import("logging.zig");
 const paths = @import("paths.zig");
 const process_utils = @import("process_utils.zig");
@@ -100,7 +101,7 @@ pub fn getExecutablePath(
 
 fn fetchLatestBunRelease(allocator: std.mem.Allocator) !types.PackageManagerSpec {
     const asset_name = try getBunReleaseAssetName(allocator);
-    const result = try fetchUrlToMemory(allocator, bun_latest_release_api, &github_api_headers);
+    const result = try http.fetchUrlToMemory(allocator, bun_latest_release_api, &github_api_headers);
 
     const parsed = try std.json.parseFromSlice(GitHubLatestRelease, allocator, result, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
@@ -223,7 +224,7 @@ fn cleanupTempDir(allocator: std.mem.Allocator, temp_dir: []const u8) void {
 }
 
 fn downloadFile(allocator: std.mem.Allocator, url: []const u8, output_path: []const u8) !void {
-    try fetchUrlToFile(allocator, url, &default_request_headers, output_path);
+    try http.fetchUrlToFile(allocator, url, &default_request_headers, output_path);
 }
 
 fn replaceInstalledBinary(allocator: std.mem.Allocator, source_path: []const u8, installed_path: []const u8) !void {
@@ -258,44 +259,6 @@ fn copyExecutable(source_path: []const u8, target_path: []const u8) !void {
     try target.chmod(0o755);
 }
 
-fn fetchUrlToMemory(allocator: std.mem.Allocator, url: []const u8, headers: RequestHeaders) ![]u8 {
-    var client: std.http.Client = .{ .allocator = allocator };
-    defer client.deinit();
-
-    var output: std.Io.Writer.Allocating = .init(allocator);
-    defer output.deinit();
-
-    const result = try client.fetch(.{
-        .location = .{ .url = url },
-        .extra_headers = headers,
-        .response_writer = &output.writer,
-    });
-    try ensureSuccessfulResponse(url, result.status);
-
-    return try allocator.dupe(u8, output.written());
-}
-
-fn fetchUrlToFile(allocator: std.mem.Allocator, url: []const u8, headers: RequestHeaders, output_path: []const u8) !void {
-    const output_dir = std.fs.path.dirname(output_path) orelse return error.InvalidPath;
-    try paths.makePathAbsolute(allocator, output_dir);
-
-    const file = try std.fs.createFileAbsolute(output_path, .{ .truncate = true, .read = true });
-    defer file.close();
-
-    var file_buffer: [4096]u8 = undefined;
-    var file_writer = file.writer(&file_buffer);
-    var client: std.http.Client = .{ .allocator = allocator };
-    defer client.deinit();
-
-    const result = try client.fetch(.{
-        .location = .{ .url = url },
-        .extra_headers = headers,
-        .response_writer = &file_writer.interface,
-    });
-    try file_writer.interface.flush();
-    try ensureSuccessfulResponse(url, result.status);
-}
-
 fn extractZip(allocator: std.mem.Allocator, archive_path: []const u8, output_dir: []const u8) !void {
     var child = std.process.Child.init(&.{ "unzip", "-oqd", output_dir, archive_path }, allocator);
     child.stdin_behavior = .Ignore;
@@ -311,14 +274,6 @@ fn extractZip(allocator: std.mem.Allocator, archive_path: []const u8, output_dir
     };
 
     if (!process_utils.termSucceeded(term)) process_utils.exitForTerm(term);
-}
-
-fn ensureSuccessfulResponse(url: []const u8, status: std.http.Status) !void {
-    const status_code = @intFromEnum(status);
-    if (status_code >= 200 and status_code < 300) return;
-
-    logging.userErrorFmt("HTTP {d} while requesting {s}", .{ status_code, url });
-    return error.CommandFailed;
 }
 
 fn normalizeReleaseVersion(raw_version: []const u8) []const u8 {

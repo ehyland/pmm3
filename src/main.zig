@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const build_options = @import("build_options");
 const logging = @import("logging.zig");
 const bun = @import("bun.zig");
+const http = @import("http.zig");
 const package_json = @import("package_json.zig");
 const paths = @import("paths.zig");
 const process_utils = @import("process_utils.zig");
@@ -334,7 +335,7 @@ fn getLatestVersion(allocator: std.mem.Allocator, package_manager_name: []const 
     const package_source = try resolvePackageSource(package_manager_name, null);
     const manifest_package_name = try encodePackageNameForRegistryPath(allocator, package_source.registry_package_name);
     const manifest_url = try std.fmt.allocPrint(allocator, "{s}/{s}/latest", .{ registry, manifest_package_name });
-    const result = try fetchUrlToMemory(allocator, manifest_url, &default_request_headers);
+    const result = try http.fetchUrlToMemory(allocator, manifest_url, &default_request_headers);
 
     const manifest = try std.json.parseFromSliceLeaky(RegistryManifest, allocator, result, .{
         .ignore_unknown_fields = true,
@@ -428,7 +429,7 @@ fn updateDefaultVersion(allocator: std.mem.Allocator, package_spec: types.Packag
 
 fn fetchLatestPmmRelease(allocator: std.mem.Allocator) !PmmRelease {
     const asset_name = try getCurrentReleaseAssetName(allocator);
-    const result = try fetchUrlToMemory(allocator, github_releases_api, &github_api_headers);
+    const result = try http.fetchUrlToMemory(allocator, github_releases_api, &github_api_headers);
 
     const parsed = try std.json.parseFromSlice([]GitHubRelease, allocator, result, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
@@ -529,7 +530,7 @@ fn cleanupTempDir(allocator: std.mem.Allocator, temp_dir: []const u8) void {
 }
 
 fn downloadFile(allocator: std.mem.Allocator, url: []const u8, output_path: []const u8) !void {
-    try fetchUrlToFile(allocator, url, &default_request_headers, output_path);
+    try http.fetchUrlToFile(allocator, url, &default_request_headers, output_path);
 }
 
 fn extractTarball(_: std.mem.Allocator, archive_path: []const u8, output_dir: []const u8, strip_components: u32) !void {
@@ -788,52 +789,6 @@ const github_api_headers = [_]std.http.Header{
     .{ .name = "Accept", .value = "application/vnd.github+json" },
     .{ .name = "User-Agent", .value = "pmm3" },
 };
-
-fn fetchUrlToMemory(allocator: std.mem.Allocator, url: []const u8, headers: RequestHeaders) ![]u8 {
-    var client: std.http.Client = .{ .allocator = allocator };
-    defer client.deinit();
-
-    var output: std.Io.Writer.Allocating = .init(allocator);
-    defer output.deinit();
-
-    const result = try client.fetch(.{
-        .location = .{ .url = url },
-        .extra_headers = headers,
-        .response_writer = &output.writer,
-    });
-    try ensureSuccessfulResponse(url, result.status);
-
-    return try allocator.dupe(u8, output.written());
-}
-
-fn fetchUrlToFile(allocator: std.mem.Allocator, url: []const u8, headers: RequestHeaders, output_path: []const u8) !void {
-    const output_dir = std.fs.path.dirname(output_path) orelse return error.InvalidPath;
-    try paths.makePathAbsolute(allocator, output_dir);
-
-    const file = try std.fs.createFileAbsolute(output_path, .{ .truncate = true, .read = true });
-    defer file.close();
-
-    var file_buffer: [4096]u8 = undefined;
-    var file_writer = file.writer(&file_buffer);
-    var client: std.http.Client = .{ .allocator = allocator };
-    defer client.deinit();
-
-    const result = try client.fetch(.{
-        .location = .{ .url = url },
-        .extra_headers = headers,
-        .response_writer = &file_writer.interface,
-    });
-    try file_writer.interface.flush();
-    try ensureSuccessfulResponse(url, result.status);
-}
-
-fn ensureSuccessfulResponse(url: []const u8, status: std.http.Status) !void {
-    const status_code = @intFromEnum(status);
-    if (status_code >= 200 and status_code < 300) return;
-
-    logging.userErrorFmt("HTTP {d} while requesting {s}", .{ status_code, url });
-    return error.CommandFailed;
-}
 
 test "resolvePackageSource uses cli-dist for latest yarn lookup" {
     const source = try resolvePackageSource("yarn", null);
