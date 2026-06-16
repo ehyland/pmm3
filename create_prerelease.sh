@@ -2,6 +2,16 @@
 
 set -e
 
+if [ -n "$(git status --porcelain)" ]; then
+    echo "Error: There are unstaged or staged changes. Commit or stash them first."
+    exit 1
+fi
+
+if [ "$(git rev-list HEAD --not --remotes)" != "" ]; then
+    echo "Error: There are local commits that have not been pushed to a remote."
+    exit 1
+fi
+
 echo "Running tests..."
 zig build test
 bun test
