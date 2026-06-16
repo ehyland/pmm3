@@ -327,6 +327,89 @@ describe('setup and usage', () => {
     });
   });
 
+  describe('shims with allow_spec_mismatch ignore spec mismatch', () => {
+    describe('npx in a pnpm project', () => {
+      let result: string;
+
+      beforeAll(async () => {
+        const testProject = await setupTestProject({
+          subDir: 'allow-spec-mismatch/npx-in-pnpm',
+          packageManager: 'pnpm@9.15.4',
+        });
+        result = await human(`npx -y cowsay@1.5.0 How good is pmm!`, {
+          cwd: testProject.projectPath,
+          stdOutOnly: true,
+        });
+      });
+
+      it('runs cowsay without a spec-mismatch error', () => {
+        expect(result).toMatch('How good is pmm!');
+        expect(result).toMatch('(oo)');
+      });
+    });
+
+    describe('pnpx in a npm project', () => {
+      let result: string;
+
+      beforeAll(async () => {
+        const testProject = await setupTestProject({
+          subDir: 'allow-spec-mismatch/pnpx-in-npm',
+          packageManager: 'npm@6.14.16',
+        });
+        result = await human(`pnpx -y cowsay@1.5.0 How good is pmm!`, {
+          cwd: testProject.projectPath,
+          stdOutOnly: true,
+        });
+      });
+
+      it('runs cowsay without a spec-mismatch error', () => {
+        expect(result).toMatch('How good is pmm!');
+        expect(result).toMatch('(oo)');
+      });
+    });
+
+    describe('npx in a yarn project', () => {
+      let result: string;
+
+      beforeAll(async () => {
+        const testProject = await setupTestProject({
+          subDir: 'allow-spec-mismatch/npx-in-yarn',
+          packageManager: 'yarn@1.22.22',
+        });
+        result = await human(`npx -y cowsay@1.5.0 How good is pmm!`, {
+          cwd: testProject.projectPath,
+          stdOutOnly: true,
+        });
+      });
+
+      it('runs cowsay without a spec-mismatch error', () => {
+        expect(result).toMatch('How good is pmm!');
+        expect(result).toMatch('(oo)');
+      });
+    });
+  });
+
+  describe('shims with allow_spec_mismatch still respect matching spec', () => {
+    describe('npx in a npm project pinned to a specific version', () => {
+      let result: string;
+
+      beforeAll(async () => {
+        const testProject = await setupTestProject({
+          subDir: 'allow-spec-mismatch/npx-in-npm',
+          packageManager: 'npm@6.14.16',
+        });
+        result = await human(`npx --version`, {
+          cwd: testProject.projectPath,
+          stdOutOnly: true,
+        });
+      });
+
+      it('runs the pinned npm version', () => {
+        expect(result.trim()).toEqual('6.14.16');
+      });
+    });
+  });
+
   describe('when a package manager is called as a child process', () => {
     let result: string;
 

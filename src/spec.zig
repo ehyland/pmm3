@@ -29,7 +29,7 @@ pub fn parseSpecString(spec_string: []const u8) !types.PackageManagerSpec {
 }
 
 pub fn getVersionCore(version: []const u8) ![]const u8 {
-    const plus_index = std.mem.indexOfScalar(u8, version, '+') orelse return version;
+    const plus_index = std.mem.findScalar(u8, version, '+') orelse return version;
     const suffix = version[plus_index + 1 ..];
 
     if (!std.mem.startsWith(u8, suffix, "sha")) return error.InvalidVersion;
@@ -39,7 +39,7 @@ pub fn getVersionCore(version: []const u8) ![]const u8 {
 
 pub fn parseVersion(version: []const u8) !Version {
     const core = try getVersionCore(version);
-    const prerelease_index = std.mem.indexOfScalar(u8, core, '-');
+    const prerelease_index = std.mem.findScalar(u8, core, '-');
     const release_core = if (prerelease_index) |index| core[0..index] else core;
     const prerelease = if (prerelease_index) |index| blk: {
         const value = core[index + 1 ..];
@@ -157,13 +157,13 @@ pub fn getShim(name: []const u8) ?types.Shim {
         return .{ .package_manager_name = "npm", .executable_name = "npm" };
     }
     if (std.mem.eql(u8, name, "npx")) {
-        return .{ .package_manager_name = "npm", .executable_name = "npx" };
+        return .{ .package_manager_name = "npm", .executable_name = "npx", .allow_spec_mismatch = true };
     }
     if (std.mem.eql(u8, name, "pnpm")) {
         return .{ .package_manager_name = "pnpm", .executable_name = "pnpm" };
     }
     if (std.mem.eql(u8, name, "pnpx")) {
-        return .{ .package_manager_name = "pnpm", .executable_name = "pnpx" };
+        return .{ .package_manager_name = "pnpm", .executable_name = "pnpx", .allow_spec_mismatch = true };
     }
     if (std.mem.eql(u8, name, "yarn")) {
         return .{ .package_manager_name = "yarn", .executable_name = "yarn" };
@@ -172,13 +172,27 @@ pub fn getShim(name: []const u8) ?types.Shim {
         return .{ .package_manager_name = "bun", .executable_name = "bun" };
     }
     if (std.mem.eql(u8, name, "bunx")) {
-        return .{ .package_manager_name = "bun", .executable_name = "bun" };
+        return .{ .package_manager_name = "bun", .executable_name = "bun", .allow_spec_mismatch = true };
     }
     return null;
 }
 
 pub fn isNativePackageManager(name: []const u8) bool {
     return std.mem.eql(u8, name, "bun");
+}
+
+test "getShim marks npx pnpx bunx as allow_spec_mismatch" {
+    try std.testing.expect(getShim("npx").?.allow_spec_mismatch);
+    try std.testing.expect(getShim("pnpx").?.allow_spec_mismatch);
+    try std.testing.expect(getShim("bunx").?.allow_spec_mismatch);
+}
+
+test "getShim leaves primary package manager shims as not allow_spec_mismatch" {
+    try std.testing.expect(!getShim("npm").?.allow_spec_mismatch);
+    try std.testing.expect(!getShim("pnpm").?.allow_spec_mismatch);
+    try std.testing.expect(!getShim("yarn").?.allow_spec_mismatch);
+    try std.testing.expect(!getShim("bun").?.allow_spec_mismatch);
+    try std.testing.expect(!getShim("pmm3").?.allow_spec_mismatch);
 }
 
 test "parse version" {

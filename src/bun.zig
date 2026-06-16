@@ -54,63 +54,63 @@ pub fn requiresMatchingProjectSpec(argv: []const []const u8) bool {
     return false;
 }
 
-pub fn getLatestVersion(allocator: std.mem.Allocator) !types.PackageManagerSpec {
-    const release = try fetchLatestBunRelease(allocator);
+pub fn getLatestVersion(ctx: types.Ctx) !types.PackageManagerSpec {
+    const release = try fetchLatestBunRelease(ctx);
     return .{ .name = "bun", .version = release.version };
 }
 
 pub fn installPackageManager(
-    allocator: std.mem.Allocator,
+    ctx: types.Ctx,
     package_spec: types.PackageManagerSpec,
     skip_cache: bool,
 ) !bool {
-    const install_path = try paths.getInstallPath(allocator, package_spec);
-    const temp_dir = try createTempDir(allocator);
-    defer cleanupTempDir(allocator, temp_dir);
+    const install_path = try paths.getInstallPath(ctx, package_spec);
+    const temp_dir = try createTempDir(ctx);
+    defer cleanupTempDir(ctx, temp_dir);
 
-    const installed_binary = try std.fs.path.join(allocator, &.{ install_path, "bun" });
+    const installed_binary = try std.fs.path.join(ctx.allocator, &.{ install_path, "bun" });
     if (!skip_cache) {
-        if (std.fs.openFileAbsolute(installed_binary, .{}) catch null) |existing| {
-            existing.close();
+        if (std.Io.Dir.openFileAbsolute(ctx.io, installed_binary, .{}) catch null) |existing| {
+            existing.close(ctx.io);
             return true;
         }
     }
 
-    const archive_path = try std.fs.path.join(allocator, &.{ temp_dir, try std.fmt.allocPrint(allocator, "bun-v{s}.zip", .{package_spec.version}) });
-    const extract_dir = try std.fs.path.join(allocator, &.{ temp_dir, "extract" });
-    const target_name = try getBunReleaseTarget(allocator);
-    const extracted_binary = try std.fs.path.join(allocator, &.{ extract_dir, try std.fmt.allocPrint(allocator, "bun-{s}/bun", .{target_name}) });
+    const archive_path = try std.fs.path.join(ctx.allocator, &.{ temp_dir, try std.fmt.allocPrint(ctx.allocator, "bun-v{s}.zip", .{package_spec.version}) });
+    const extract_dir = try std.fs.path.join(ctx.allocator, &.{ temp_dir, "extract" });
+    const target_name = try getBunReleaseTarget(ctx);
+    const extracted_binary = try std.fs.path.join(ctx.allocator, &.{ extract_dir, try std.fmt.allocPrint(ctx.allocator, "bun-{s}/bun", .{target_name}) });
 
     logging.friendly("Installing {s}@{s}", .{ package_spec.name, package_spec.version });
 
-    try paths.removeTreeAbsoluteIfPresent(allocator, install_path);
-    try paths.makePathAbsolute(allocator, extract_dir);
-    try downloadFile(allocator, try getBunReleaseDownloadUrl(allocator, package_spec.version), archive_path);
-    try extractZip(allocator, archive_path, extract_dir);
-    try replaceInstalledBinary(allocator, extracted_binary, installed_binary);
+    paths.removeTreeAbsoluteIfPresent(ctx, install_path);
+    try paths.makePathAbsolute(ctx, extract_dir);
+    try downloadFile(ctx, try getBunReleaseDownloadUrl(ctx, package_spec.version), archive_path);
+    try extractZip(ctx, archive_path, extract_dir);
+    try replaceInstalledBinary(ctx, extracted_binary, installed_binary);
     return false;
 }
 
 pub fn getExecutablePath(
-    allocator: std.mem.Allocator,
+    ctx: types.Ctx,
     package_spec: types.PackageManagerSpec,
     executable_name: []const u8,
 ) ![]const u8 {
-    return try std.fs.path.join(allocator, &.{ try paths.getInstallPath(allocator, package_spec), executable_name });
+    return try std.fs.path.join(ctx.allocator, &.{ try paths.getInstallPath(ctx, package_spec), executable_name });
 }
 
-fn fetchLatestBunRelease(allocator: std.mem.Allocator) !types.PackageManagerSpec {
-    const asset_name = try getBunReleaseAssetName(allocator);
-    const result = try http.fetchUrlToMemory(allocator, bun_latest_release_api, &github_api_headers);
+fn fetchLatestBunRelease(ctx: types.Ctx) !types.PackageManagerSpec {
+    const asset_name = try getBunReleaseAssetName(ctx);
+    const result = try http.fetchUrlToMemory(ctx, bun_latest_release_api, &github_api_headers);
 
-    const parsed = try std.json.parseFromSlice(GitHubLatestRelease, allocator, result, .{ .ignore_unknown_fields = true });
+    const parsed = try std.json.parseFromSlice(GitHubLatestRelease, ctx.allocator, result, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
 
     for (parsed.value.assets) |asset| {
         if (std.mem.eql(u8, asset.name, asset_name)) {
             return .{
                 .name = "bun",
-                .version = try allocator.dupe(u8, normalizeBunReleaseVersion(parsed.value.tag_name)),
+                .version = try ctx.allocator.dupe(u8, normalizeBunReleaseVersion(parsed.value.tag_name)),
             };
         }
     }
@@ -119,7 +119,7 @@ fn fetchLatestBunRelease(allocator: std.mem.Allocator) !types.PackageManagerSpec
     return error.MissingReleaseAsset;
 }
 
-fn getBunReleaseTarget(allocator: std.mem.Allocator) ![]const u8 {
+fn getBunReleaseTarget(ctx: types.Ctx) ![]const u8 {
     const os_name: []const u8 = switch (builtin.os.tag) {
         .macos => "darwin",
         .linux => "linux",
@@ -132,32 +132,32 @@ fn getBunReleaseTarget(allocator: std.mem.Allocator) ![]const u8 {
         else => return error.UnsupportedTarget,
     };
 
-    if (builtin.os.tag == .macos and builtin.cpu.arch == .x86_64 and try isRosettaTranslated(allocator)) {
+    if (builtin.os.tag == .macos and builtin.cpu.arch == .x86_64 and try isRosettaTranslated(ctx)) {
         logging.info("Your shell is running in Rosetta 2. Downloading bun for darwin-aarch64 instead", .{});
         arch_name = "aarch64";
     }
 
-    var target = try std.fmt.allocPrint(allocator, "{s}-{s}", .{ os_name, arch_name });
+    var target = try std.fmt.allocPrint(ctx.allocator, "{s}-{s}", .{ os_name, arch_name });
 
-    if (builtin.os.tag == .linux and try isAlpineLinux()) {
-        target = try std.fmt.allocPrint(allocator, "{s}-musl", .{target});
+    if (builtin.os.tag == .linux and try isAlpineLinux(ctx.io)) {
+        target = try std.fmt.allocPrint(ctx.allocator, "{s}-musl", .{target});
     }
 
-    if ((std.mem.startsWith(u8, target, "darwin-x64") or std.mem.startsWith(u8, target, "linux-x64")) and !hostHasAvx2()) {
-        target = try std.fmt.allocPrint(allocator, "{s}-baseline", .{target});
+    if ((std.mem.startsWith(u8, target, "darwin-x64") or std.mem.startsWith(u8, target, "linux-x64")) and !hostHasAvx2(ctx.io)) {
+        target = try std.fmt.allocPrint(ctx.allocator, "{s}-baseline", .{target});
     }
 
     return target;
 }
 
-fn getBunReleaseAssetName(allocator: std.mem.Allocator) ![]const u8 {
-    const target = try getBunReleaseTarget(allocator);
-    return try std.fmt.allocPrint(allocator, "bun-{s}.zip", .{target});
+fn getBunReleaseAssetName(ctx: types.Ctx) ![]const u8 {
+    const target = try getBunReleaseTarget(ctx);
+    return try std.fmt.allocPrint(ctx.allocator, "bun-{s}.zip", .{target});
 }
 
-fn getBunReleaseDownloadUrl(allocator: std.mem.Allocator, version: []const u8) ![]const u8 {
-    const target = try getBunReleaseTarget(allocator);
-    return try std.fmt.allocPrint(allocator, "{s}/releases/download/bun-v{s}/bun-{s}.zip", .{ bun_download_repo, version, target });
+fn getBunReleaseDownloadUrl(ctx: types.Ctx, version: []const u8) ![]const u8 {
+    const target = try getBunReleaseTarget(ctx);
+    return try std.fmt.allocPrint(ctx.allocator, "{s}/releases/download/bun-v{s}/bun-{s}.zip", .{ bun_download_repo, version, target });
 }
 
 fn normalizeBunReleaseVersion(raw_version: []const u8) []const u8 {
@@ -166,35 +166,35 @@ fn normalizeBunReleaseVersion(raw_version: []const u8) []const u8 {
     return normalizeReleaseVersion(raw_version);
 }
 
-fn isRosettaTranslated(allocator: std.mem.Allocator) !bool {
-    const result = try std.process.Child.run(.{
-        .allocator = allocator,
+fn isRosettaTranslated(ctx: types.Ctx) !bool {
+    const result = try std.process.run(ctx.allocator, ctx.io, .{
         .argv = &.{ "sysctl", "-n", "sysctl.proc_translated" },
-        .max_output_bytes = 32,
+        .stdout_limit = .limited(32),
     });
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
+    defer ctx.allocator.free(result.stdout);
+    defer ctx.allocator.free(result.stderr);
 
     return std.mem.eql(u8, std.mem.trim(u8, result.stdout, " \t\r\n"), "1");
 }
 
-fn isAlpineLinux() !bool {
-    std.fs.accessAbsolute("/etc/alpine-release", .{}) catch return false;
+fn isAlpineLinux(io: std.Io) !bool {
+    std.Io.Dir.accessAbsolute(io, "/etc/alpine-release", .{}) catch return false;
     return true;
 }
 
-fn hostHasAvx2() bool {
+fn hostHasAvx2(io: std.Io) bool {
     if (builtin.cpu.arch != .x86_64) return false;
 
     if (builtin.os.tag == .linux) {
-        const file = std.fs.openFileAbsolute("/proc/cpuinfo", .{}) catch return false;
-        defer file.close();
+        const file = std.Io.Dir.openFileAbsolute(io, "/proc/cpuinfo", .{}) catch return false;
+        defer file.close(io);
 
-        var buffer: [4096]u8 = undefined;
+        var file_reader = file.reader(io, &.{});
+        var buf: [4096]u8 = undefined;
         while (true) {
-            const bytes_read = file.read(&buffer) catch return false;
+            const bytes_read = file_reader.interface.readSliceShort(&buf) catch return false;
             if (bytes_read == 0) break;
-            if (std.mem.indexOf(u8, buffer[0..bytes_read], "avx2") != null) return true;
+            if (std.mem.find(u8, buf[0..bytes_read], "avx2") != null) return true;
         }
         return false;
     }
@@ -202,14 +202,17 @@ fn hostHasAvx2() bool {
     return std.Target.x86.featureSetHas(builtin.cpu.features, .avx2);
 }
 
-fn createTempDir(allocator: std.mem.Allocator) ![]const u8 {
-    const base_dir = std.process.getEnvVarOwned(allocator, "TMPDIR") catch try allocator.dupe(u8, "/tmp");
+fn createTempDir(ctx: types.Ctx) ![]const u8 {
+    const base_dir = ctx.environ.getAlloc(ctx.allocator, "TMPDIR") catch try ctx.allocator.dupe(u8, "/tmp");
 
     var attempt: usize = 0;
     while (attempt < 32) : (attempt += 1) {
-        const candidate = try std.fmt.allocPrint(allocator, "pmm3-{x}", .{std.crypto.random.int(u64)});
-        const path = try std.fs.path.join(allocator, &.{ base_dir, candidate });
-        std.fs.cwd().makeDir(path) catch |err| switch (err) {
+        var random_bytes: [@sizeOf(u64)]u8 = undefined;
+        ctx.io.random(&random_bytes);
+        const rand_val: u64 = @bitCast(random_bytes);
+        const candidate = try std.fmt.allocPrint(ctx.allocator, "pmm3-{x}", .{rand_val});
+        const path = try std.fs.path.join(ctx.allocator, &.{ base_dir, candidate });
+        std.Io.Dir.cwd().createDir(ctx.io, path, .default_dir) catch |err| switch (err) {
             error.PathAlreadyExists => continue,
             else => return err,
         };
@@ -219,53 +222,54 @@ fn createTempDir(allocator: std.mem.Allocator) ![]const u8 {
     return error.TemporaryNameUnavailable;
 }
 
-fn cleanupTempDir(allocator: std.mem.Allocator, temp_dir: []const u8) void {
-    paths.removeTreeAbsoluteIfPresent(allocator, temp_dir) catch {};
+fn cleanupTempDir(ctx: types.Ctx, temp_dir: []const u8) void {
+    paths.removeTreeAbsoluteIfPresent(ctx, temp_dir);
 }
 
-fn downloadFile(allocator: std.mem.Allocator, url: []const u8, output_path: []const u8) !void {
-    try http.fetchUrlToFile(allocator, url, &default_request_headers, output_path);
+fn downloadFile(ctx: types.Ctx, url: []const u8, output_path: []const u8) !void {
+    try http.fetchUrlToFile(ctx, url, &default_request_headers, output_path);
 }
 
-fn replaceInstalledBinary(allocator: std.mem.Allocator, source_path: []const u8, installed_path: []const u8) !void {
+fn replaceInstalledBinary(ctx: types.Ctx, source_path: []const u8, installed_path: []const u8) !void {
     const bin_dir = std.fs.path.dirname(installed_path) orelse return error.InvalidPath;
-    const staged_path = try std.fs.path.join(allocator, &.{ bin_dir, "bun.new" });
+    const staged_path = try std.fs.path.join(ctx.allocator, &.{ bin_dir, "bun.new" });
 
-    try paths.makePathAbsolute(allocator, bin_dir);
-    try copyExecutable(source_path, staged_path);
-    std.fs.renameAbsolute(staged_path, installed_path) catch |err| switch (err) {
-        error.PathAlreadyExists => {
-            try std.fs.deleteFileAbsolute(installed_path);
-            try std.fs.renameAbsolute(staged_path, installed_path);
+    try paths.makePathAbsolute(ctx, bin_dir);
+    try copyExecutable(ctx, source_path, staged_path);
+    std.Io.Dir.renameAbsolute(staged_path, installed_path, ctx.io) catch |err| switch (err) {
+        error.FileNotFound => {
+            try std.Io.Dir.deleteFileAbsolute(ctx.io, installed_path);
+            try std.Io.Dir.renameAbsolute(staged_path, installed_path, ctx.io);
         },
         else => return err,
     };
 }
 
-fn copyExecutable(source_path: []const u8, target_path: []const u8) !void {
-    const source = try std.fs.openFileAbsolute(source_path, .{});
-    defer source.close();
+fn copyExecutable(ctx: types.Ctx, source_path: []const u8, target_path: []const u8) !void {
+    const source = try std.Io.Dir.openFileAbsolute(ctx.io, source_path, .{});
+    defer source.close(ctx.io);
 
-    const target = try std.fs.createFileAbsolute(target_path, .{ .truncate = true, .read = true, .mode = 0o755 });
-    defer target.close();
+    const target = try std.Io.Dir.createFileAbsolute(ctx.io, target_path, .{ .truncate = true, .read = true, .permissions = .executable_file });
+    defer target.close(ctx.io);
 
-    var buffer: [8192]u8 = undefined;
+    var source_reader = source.reader(ctx.io, &.{});
+    var buf: [8192]u8 = undefined;
     while (true) {
-        const bytes_read = try source.read(&buffer);
+        const bytes_read = try source_reader.interface.readSliceShort(&buf);
         if (bytes_read == 0) break;
-        try target.writeAll(buffer[0..bytes_read]);
+        try target.writeStreamingAll(ctx.io, buf[0..bytes_read]);
     }
 
-    try target.chmod(0o755);
+    try target.setPermissions(ctx.io, std.Io.File.Permissions.fromMode(0o755));
 }
 
-fn extractZip(allocator: std.mem.Allocator, archive_path: []const u8, output_dir: []const u8) !void {
-    var child = std.process.Child.init(&.{ "unzip", "-oqd", output_dir, archive_path }, allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Inherit;
-
-    const term = child.spawnAndWait() catch |err| switch (err) {
+fn extractZip(ctx: types.Ctx, archive_path: []const u8, output_dir: []const u8) !void {
+    var child = std.process.spawn(ctx.io, .{
+        .argv = &.{ "unzip", "-oqd", output_dir, archive_path },
+        .stdin = .inherit,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    }) catch |err| switch (err) {
         error.FileNotFound => {
             logging.userError("unzip is required to install bun");
             return error.CommandFailed;
@@ -273,6 +277,7 @@ fn extractZip(allocator: std.mem.Allocator, archive_path: []const u8, output_dir
         else => return err,
     };
 
+    const term = try child.wait(ctx.io);
     if (!process_utils.termSucceeded(term)) process_utils.exitForTerm(term);
 }
 

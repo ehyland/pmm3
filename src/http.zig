@@ -1,13 +1,14 @@
 const std = @import("std");
 const logging = @import("logging.zig");
+const types = @import("types.zig");
 
 pub const RequestHeaders = []const std.http.Header;
 
-pub fn fetchUrlToMemory(allocator: std.mem.Allocator, url: []const u8, headers: RequestHeaders) ![]u8 {
-    var client: std.http.Client = .{ .allocator = allocator };
+pub fn fetchUrlToMemory(ctx: types.Ctx, url: []const u8, headers: RequestHeaders) ![]u8 {
+    var client: std.http.Client = .{ .allocator = ctx.allocator, .io = ctx.io };
     defer client.deinit();
 
-    var output: std.Io.Writer.Allocating = .init(allocator);
+    var output: std.Io.Writer.Allocating = .init(ctx.allocator);
     defer output.deinit();
 
     const result = try client.fetch(.{
@@ -17,19 +18,20 @@ pub fn fetchUrlToMemory(allocator: std.mem.Allocator, url: []const u8, headers: 
     });
     try ensureSuccessfulResponse(url, result.status);
 
-    return try allocator.dupe(u8, output.written());
+    return try ctx.allocator.dupe(u8, output.written());
 }
 
-pub fn fetchUrlToFile(allocator: std.mem.Allocator, url: []const u8, headers: RequestHeaders, output_path: []const u8) !void {
+pub fn fetchUrlToFile(ctx: types.Ctx, url: []const u8, headers: RequestHeaders, output_path: []const u8) !void {
     const output_dir = std.fs.path.dirname(output_path) orelse return error.InvalidPath;
-    try std.fs.cwd().makePath(output_dir);
+    try std.Io.Dir.cwd().createDirPath(ctx.io, output_dir);
 
-    const file = try std.fs.createFileAbsolute(output_path, .{ .truncate = true, .read = true });
-    defer file.close();
+    const file = try std.Io.Dir.createFileAbsolute(ctx.io, output_path, .{ .truncate = true, .read = true });
+    defer file.close(ctx.io);
 
     var file_buffer: [4096]u8 = undefined;
-    var file_writer = file.writer(&file_buffer);
-    var client: std.http.Client = .{ .allocator = allocator };
+    var file_writer = file.writer(ctx.io, &file_buffer);
+
+    var client: std.http.Client = .{ .allocator = ctx.allocator, .io = ctx.io };
     defer client.deinit();
 
     const result = try client.fetch(.{

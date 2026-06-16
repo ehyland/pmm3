@@ -41,31 +41,35 @@ const PackageSource = struct {
 
 const RequestHeaders = []const std.http.Header;
 
-pub fn main() !void {
-    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+pub fn main(init: std.process.Init) !void {
+    var arena_state = std.heap.ArenaAllocator.init(init.gpa);
     defer arena_state.deinit();
-    const allocator = arena_state.allocator();
 
-    const argv = try std.process.argsAlloc(allocator);
+    const ctx = types.Ctx{
+        .allocator = arena_state.allocator(),
+        .io = init.io,
+        .environ = init.minimal.environ,
+    };
+
+    const argv = try init.minimal.args.toSlice(ctx.allocator);
     if (argv.len == 0) return;
 
-    // The same binary is invoked both as `pmm3` and via shim names like `pnpm`.
     const executable_name = std.fs.path.basename(argv[0]);
 
     if (spec.getShim(executable_name)) |shim| {
         if (std.mem.eql(u8, executable_name, "pmm3")) {
-            try runPmmCli(allocator, argv);
+            try runPmmCli(ctx, argv);
             return;
         }
 
-        try runPackageManager(allocator, shim, argv);
+        try runPackageManager(ctx, shim, argv);
         return;
     }
 
-    try runPmmCli(allocator, argv);
+    try runPmmCli(ctx, argv);
 }
 
-fn runPmmCli(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+fn runPmmCli(ctx: types.Ctx, argv: []const []const u8) !void {
     if (argv.len < 2) {
         logging.printUsage();
         return;
@@ -78,22 +82,20 @@ fn runPmmCli(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         return;
     }
 
-    // Keep command parsing explicit so the supported surface stays obvious.
-
     if (std.mem.eql(u8, command, "update-local")) {
-        try commandUpdateLocal(allocator);
+        try commandUpdateLocal(ctx);
         return;
     }
 
     if (std.mem.eql(u8, command, "update-default")) {
         const name = if (argv.len >= 3) argv[2] else "all";
         const version = if (argv.len >= 4) argv[3] else null;
-        try commandUpdateDefault(allocator, name, version);
+        try commandUpdateDefault(ctx, name, version);
         return;
     }
 
     if (std.mem.eql(u8, command, "update-self")) {
-        try commandUpdateSelf(allocator);
+        try commandUpdateSelf(ctx);
         return;
     }
 
@@ -111,7 +113,7 @@ fn runPmmCli(allocator: std.mem.Allocator, argv: []const []const u8) !void {
                 }
             }
         }
-        try setup.run(allocator, custom_rc);
+        try setup.run(ctx, custom_rc);
         return;
     }
 
@@ -121,7 +123,7 @@ fn runPmmCli(allocator: std.mem.Allocator, argv: []const []const u8) !void {
             std.process.exit(1);
         }
 
-        try commandPin(allocator, argv[2], argv[3]);
+        try commandPin(ctx, argv[2], argv[3]);
         return;
     }
 
@@ -135,21 +137,21 @@ fn runPmmCli(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     std.process.exit(1);
 }
 
-fn commandUpdateLocal(allocator: std.mem.Allocator) !void {
-    const found = (try package_json.findPackageManagerSpec(allocator)) orelse {
+fn commandUpdateLocal(ctx: types.Ctx) !void {
+    const found = (try package_json.findPackageManagerSpec(ctx)) orelse {
         logging.userError("Unable to find package.json with \"packageManager\" field");
         std.process.exit(1);
     };
 
-    const latest = try getLatestVersion(allocator, found.spec.name);
+    const latest = try getLatestVersion(ctx, found.spec.name);
 
     if (std.mem.eql(u8, latest.version, found.spec.version)) {
         logging.info("Already on latest version {s}@{s}", .{ latest.name, latest.version });
         return;
     }
 
-    _ = try installPackageManager(allocator, latest, false);
-    try package_json.writePackageManagerField(allocator, found.package_json_path, latest);
+    _ = try installPackageManager(ctx, latest, false);
+    try package_json.writePackageManagerField(ctx, found.package_json_path, latest);
 
     logging.friendly("Updated registry!", .{});
     logging.info("  From: {s}@{s}", .{ found.spec.name, found.spec.version });
@@ -157,7 +159,7 @@ fn commandUpdateLocal(allocator: std.mem.Allocator) !void {
 }
 
 fn commandUpdateDefault(
-    allocator: std.mem.Allocator,
+    ctx: types.Ctx,
     name_arg: []const u8,
     version_arg: ?[]const u8,
 ) !void {
@@ -170,9 +172,9 @@ fn commandUpdateDefault(
         logging.friendly("Updating all package managers", .{});
 
         inline for (spec.supported_package_managers) |name| {
-            const package_spec = try getRequestedOrLatestVersion(allocator, name, null);
-            _ = try installPackageManager(allocator, package_spec, false);
-            try updateDefaultVersion(allocator, package_spec);
+            const package_spec = try getRequestedOrLatestVersion(ctx, name, null);
+            _ = try installPackageManager(ctx, package_spec, false);
+            try updateDefaultVersion(ctx, package_spec);
         }
 
         return;
@@ -183,13 +185,13 @@ fn commandUpdateDefault(
         std.process.exit(1);
     }
 
-    const package_spec = try getRequestedOrLatestVersion(allocator, name_arg, version_arg);
-    _ = try installPackageManager(allocator, package_spec, false);
-    try updateDefaultVersion(allocator, package_spec);
+    const package_spec = try getRequestedOrLatestVersion(ctx, name_arg, version_arg);
+    _ = try installPackageManager(ctx, package_spec, false);
+    try updateDefaultVersion(ctx, package_spec);
 }
 
-fn commandUpdateSelf(allocator: std.mem.Allocator) !void {
-    const latest = try fetchLatestPmmRelease(allocator);
+fn commandUpdateSelf(ctx: types.Ctx) !void {
+    const latest = try fetchLatestPmmRelease(ctx);
     const current_version = normalizeReleaseVersion(build_options.pmm_version);
 
     if (spec.parseVersion(current_version)) |current| {
@@ -204,24 +206,24 @@ fn commandUpdateSelf(allocator: std.mem.Allocator) !void {
 
     logging.friendly("Updating pmm3 to {s}", .{latest.version});
 
-    const temp_dir = try createTempDir(allocator);
-    defer cleanupTempDir(allocator, temp_dir);
+    const temp_dir = try createTempDir(ctx);
+    defer cleanupTempDir(ctx, temp_dir);
 
-    const archive_path = try std.fs.path.join(allocator, &.{ temp_dir, latest.asset_name });
-    const extract_dir = try std.fs.path.join(allocator, &.{ temp_dir, "extract" });
+    const archive_path = try std.fs.path.join(ctx.allocator, &.{ temp_dir, latest.asset_name });
+    const extract_dir = try std.fs.path.join(ctx.allocator, &.{ temp_dir, "extract" });
 
-    try paths.makePathAbsolute(allocator, extract_dir);
-    try downloadFile(allocator, latest.download_url, archive_path);
-    try extractTarball(allocator, archive_path, extract_dir, 0);
+    try paths.makePathAbsolute(ctx, extract_dir);
+    try downloadFile(ctx, latest.download_url, archive_path);
+    try extractTarball(ctx, archive_path, extract_dir, 0);
 
-    const downloaded_binary = try findExtractedBinary(allocator, extract_dir);
-    const installed_binary = try paths.getInstalledPmmPath(allocator);
-    try replaceInstalledBinary(allocator, downloaded_binary, installed_binary);
-    try runInstalledSetup(allocator, installed_binary);
+    const downloaded_binary = try findExtractedBinary(ctx, extract_dir);
+    const installed_binary = try paths.getInstalledPmmPath(ctx);
+    try replaceInstalledBinary(ctx, downloaded_binary, installed_binary);
+    try runInstalledSetup(ctx, installed_binary);
 }
 
 fn commandPin(
-    allocator: std.mem.Allocator,
+    ctx: types.Ctx,
     package_manager_name: []const u8,
     input_path: []const u8,
 ) !void {
@@ -230,45 +232,47 @@ fn commandPin(
         std.process.exit(1);
     }
 
-    const cwd = try std.process.getCwdAlloc(allocator);
+    const cwd = try std.process.currentPathAlloc(ctx.io, ctx.allocator);
     const absolute_input_path = if (std.fs.path.isAbsolute(input_path))
-        try allocator.dupe(u8, input_path)
+        try ctx.allocator.dupe(u8, input_path)
     else
-        try std.fs.path.join(allocator, &.{ cwd, input_path });
+        try std.fs.path.join(ctx.allocator, &.{ cwd, input_path });
     const package_dir = if (std.mem.eql(u8, std.fs.path.basename(absolute_input_path), "package.json"))
         (std.fs.path.dirname(absolute_input_path) orelse absolute_input_path)
     else
         absolute_input_path;
 
-    if (!try package_json.checkPackageExists(allocator, package_dir)) {
-        const relative = try std.fs.path.relative(allocator, cwd, package_dir);
+    if (!try package_json.checkPackageExists(ctx, package_dir)) {
+        const relative = try std.fs.path.relative(ctx.allocator, cwd, null, cwd, package_dir);
         logging.userErrorFmt("Sorry, \"package.json\" not found in ./{s}", .{relative});
         std.process.exit(1);
     }
 
-    const latest = try getLatestVersion(allocator, package_manager_name);
-    const package_json_path = try std.fs.path.join(allocator, &.{ package_dir, "package.json" });
-    try package_json.writePackageManagerField(allocator, package_json_path, latest);
+    const latest = try getLatestVersion(ctx, package_manager_name);
+    const package_json_path = try std.fs.path.join(ctx.allocator, &.{ package_dir, "package.json" });
+    try package_json.writePackageManagerField(ctx, package_json_path, latest);
 
     logging.friendly("Pinned {s}@{s}", .{ latest.name, latest.version });
 }
 
 fn runPackageManager(
-    allocator: std.mem.Allocator,
+    ctx: types.Ctx,
     shim: types.Shim,
     argv: []const []const u8,
 ) !void {
-    var found = try package_json.findPackageManagerSpec(allocator);
+    var found = try package_json.findPackageManagerSpec(ctx);
 
     if (found) |*configured| {
         if (!std.mem.eql(u8, configured.spec.name, shim.package_manager_name)) {
-            if (paths.ignoreSpecMismatch(allocator)) {
+            if (paths.ignoreSpecMismatch(ctx)) {
+                found = null;
+            } else if (shim.allow_spec_mismatch) {
                 found = null;
             } else if (spec.isNativePackageManager(shim.package_manager_name) and !bun.requiresMatchingProjectSpec(argv)) {
                 found = null;
             } else {
-                const cwd = try std.process.getCwdAlloc(allocator);
-                const relative = try std.fs.path.relative(allocator, cwd, configured.package_json_path);
+                const cwd = try std.process.currentPathAlloc(ctx.io, ctx.allocator);
+                const relative = try std.fs.path.relative(ctx.allocator, cwd, null, cwd, configured.package_json_path);
                 logging.userErrorFmt("This project is configured to use {s}.", .{configured.spec.name});
                 logging.info("See \"packageManager\" field in ./{s}", .{relative});
                 std.process.exit(1);
@@ -276,14 +280,13 @@ fn runPackageManager(
         }
     }
 
-    // If no project-level spec exists, fall back to the cached global default.
-    const package_spec = if (found) |configured| configured.spec else try getDefaultSpec(allocator, shim.package_manager_name);
+    const package_spec = if (found) |configured| configured.spec else try getDefaultSpec(ctx, shim.package_manager_name);
 
-    _ = try installPackageManager(allocator, package_spec, false);
-    const executable_path = try getExecutablePath(allocator, package_spec, shim.executable_name);
+    _ = try installPackageManager(ctx, package_spec, false);
+    const executable_path = try getExecutablePath(ctx, package_spec, shim.executable_name);
 
     const uses_node_runtime = !spec.isNativePackageManager(shim.package_manager_name);
-    const child_argv = try allocator.alloc([]const u8, argv.len + @intFromBool(uses_node_runtime));
+    const child_argv = try ctx.allocator.alloc([]const u8, argv.len + @intFromBool(uses_node_runtime));
 
     if (uses_node_runtime) {
         child_argv[0] = "node";
@@ -300,21 +303,22 @@ fn runPackageManager(
         }
     }
 
-    var env_map = try std.process.getEnvMap(allocator);
+    var env_map = try std.process.Environ.createMap(ctx.environ, ctx.allocator);
     try env_map.put("PMM_IGNORE_SPEC_MISS_MATCH", "1");
 
-    var child = std.process.Child.init(child_argv, allocator);
-    child.stdin_behavior = .Inherit;
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
-    child.env_map = &env_map;
-
-    const term = try child.spawnAndWait();
+    var child = try std.process.spawn(ctx.io, .{
+        .argv = child_argv,
+        .stdin = .inherit,
+        .stdout = .inherit,
+        .stderr = .inherit,
+        .environ_map = &env_map,
+    });
+    const term = try child.wait(ctx.io);
     process_utils.exitForTerm(term);
 }
 
 fn getRequestedOrLatestVersion(
-    allocator: std.mem.Allocator,
+    ctx: types.Ctx,
     package_manager_name: []const u8,
     version: ?[]const u8,
 ) !types.PackageManagerSpec {
@@ -323,21 +327,21 @@ fn getRequestedOrLatestVersion(
         return .{ .name = package_manager_name, .version = requested };
     }
 
-    return try getLatestVersion(allocator, package_manager_name);
+    return try getLatestVersion(ctx, package_manager_name);
 }
 
-fn getLatestVersion(allocator: std.mem.Allocator, package_manager_name: []const u8) !types.PackageManagerSpec {
+fn getLatestVersion(ctx: types.Ctx, package_manager_name: []const u8) !types.PackageManagerSpec {
     if (spec.isNativePackageManager(package_manager_name)) {
-        return try bun.getLatestVersion(allocator);
+        return try bun.getLatestVersion(ctx);
     }
 
-    const registry = try paths.getRegistry(allocator);
+    const registry = try paths.getRegistry(ctx);
     const package_source = try resolvePackageSource(package_manager_name, null);
-    const manifest_package_name = try encodePackageNameForRegistryPath(allocator, package_source.registry_package_name);
-    const manifest_url = try std.fmt.allocPrint(allocator, "{s}/{s}/latest", .{ registry, manifest_package_name });
-    const result = try http.fetchUrlToMemory(allocator, manifest_url, &default_request_headers);
+    const manifest_package_name = try encodePackageNameForRegistryPath(ctx.allocator, package_source.registry_package_name);
+    const manifest_url = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}/latest", .{ registry, manifest_package_name });
+    const result = try http.fetchUrlToMemory(ctx, manifest_url, &default_request_headers);
 
-    const manifest = try std.json.parseFromSliceLeaky(RegistryManifest, allocator, result, .{
+    const manifest = try std.json.parseFromSliceLeaky(RegistryManifest, ctx.allocator, result, .{
         .ignore_unknown_fields = true,
     });
 
@@ -395,14 +399,14 @@ fn encodePackageNameForRegistryPath(allocator: std.mem.Allocator, package_name: 
     return package_name;
 }
 
-fn getDefaultSpec(allocator: std.mem.Allocator, package_manager_name: []const u8) !types.PackageManagerSpec {
-    const version = try getDefaultVersion(allocator, package_manager_name);
+fn getDefaultSpec(ctx: types.Ctx, package_manager_name: []const u8) !types.PackageManagerSpec {
+    const version = try getDefaultVersion(ctx, package_manager_name);
     return .{ .name = package_manager_name, .version = version };
 }
 
-fn getDefaultVersion(allocator: std.mem.Allocator, package_manager_name: []const u8) ![]const u8 {
-    const default_path = try paths.getDefaultFilePath(allocator, package_manager_name);
-    if (try paths.readFileIfPresent(allocator, default_path)) |raw| {
+fn getDefaultVersion(ctx: types.Ctx, package_manager_name: []const u8) ![]const u8 {
+    const default_path = try paths.getDefaultFilePath(ctx, package_manager_name);
+    if (try paths.readFileIfPresent(ctx, default_path)) |raw| {
         const trimmed = std.mem.trim(u8, raw, " \t\r\n");
         if (trimmed.len != 0) {
             if (spec.parseVersion(trimmed)) |_| {
@@ -411,30 +415,30 @@ fn getDefaultVersion(allocator: std.mem.Allocator, package_manager_name: []const
         }
     }
 
-    const latest = try getLatestVersion(allocator, package_manager_name);
-    try updateDefaultVersion(allocator, latest);
+    const latest = try getLatestVersion(ctx, package_manager_name);
+    try updateDefaultVersion(ctx, latest);
     return latest.version;
 }
 
-fn updateDefaultVersion(allocator: std.mem.Allocator, package_spec: types.PackageManagerSpec) !void {
-    const default_path = try paths.getDefaultFilePath(allocator, package_spec.name);
+fn updateDefaultVersion(ctx: types.Ctx, package_spec: types.PackageManagerSpec) !void {
+    const default_path = try paths.getDefaultFilePath(ctx, package_spec.name);
     const default_dir = std.fs.path.dirname(default_path) orelse return error.InvalidPath;
-    try paths.makePathAbsolute(allocator, default_dir);
+    try paths.makePathAbsolute(ctx, default_dir);
     logging.friendly("Setting {s} default to version {s}", .{ package_spec.name, package_spec.version });
 
-    const file = try std.fs.createFileAbsolute(default_path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(package_spec.version);
+    const file = try std.Io.Dir.createFileAbsolute(ctx.io, default_path, .{ .truncate = true });
+    defer file.close(ctx.io);
+    try file.writeStreamingAll(ctx.io, package_spec.version);
 }
 
-fn fetchLatestPmmRelease(allocator: std.mem.Allocator) !PmmRelease {
-    const asset_name = try getCurrentReleaseAssetName(allocator);
-    const result = try http.fetchUrlToMemory(allocator, github_releases_api, &github_api_headers);
+fn fetchLatestPmmRelease(ctx: types.Ctx) !PmmRelease {
+    const asset_name = try getCurrentReleaseAssetName(ctx.allocator);
+    const result = try http.fetchUrlToMemory(ctx, github_releases_api, &github_api_headers);
 
-    const parsed = try std.json.parseFromSlice([]GitHubRelease, allocator, result, .{ .ignore_unknown_fields = true });
+    const parsed = try std.json.parseFromSlice([]GitHubRelease, ctx.allocator, result, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
 
-    return selectLatestRelease(allocator, parsed.value, asset_name);
+    return selectLatestRelease(ctx.allocator, parsed.value, asset_name);
 }
 
 fn selectLatestRelease(
@@ -508,14 +512,17 @@ fn normalizeReleaseVersion(raw_version: []const u8) []const u8 {
     return raw_version;
 }
 
-fn createTempDir(allocator: std.mem.Allocator) ![]const u8 {
-    const base_dir = std.process.getEnvVarOwned(allocator, "TMPDIR") catch try allocator.dupe(u8, "/tmp");
+fn createTempDir(ctx: types.Ctx) ![]const u8 {
+    const base_dir = ctx.environ.getAlloc(ctx.allocator, "TMPDIR") catch try ctx.allocator.dupe(u8, "/tmp");
 
     var attempt: usize = 0;
     while (attempt < 32) : (attempt += 1) {
-        const candidate = try std.fmt.allocPrint(allocator, "pmm3-{x}", .{std.crypto.random.int(u64)});
-        const path = try std.fs.path.join(allocator, &.{ base_dir, candidate });
-        std.fs.cwd().makeDir(path) catch |err| switch (err) {
+        var random_bytes: [@sizeOf(u64)]u8 = undefined;
+        ctx.io.random(&random_bytes);
+        const rand_val: u64 = @bitCast(random_bytes);
+        const candidate = try std.fmt.allocPrint(ctx.allocator, "pmm3-{x}", .{rand_val});
+        const path = try std.fs.path.join(ctx.allocator, &.{ base_dir, candidate });
+        std.Io.Dir.cwd().createDir(ctx.io, path, .default_dir) catch |err| switch (err) {
             error.PathAlreadyExists => continue,
             else => return err,
         };
@@ -525,98 +532,101 @@ fn createTempDir(allocator: std.mem.Allocator) ![]const u8 {
     return error.TemporaryNameUnavailable;
 }
 
-fn cleanupTempDir(allocator: std.mem.Allocator, temp_dir: []const u8) void {
-    paths.removeTreeAbsoluteIfPresent(allocator, temp_dir) catch {};
+fn cleanupTempDir(ctx: types.Ctx, temp_dir: []const u8) void {
+    paths.removeTreeAbsoluteIfPresent(ctx, temp_dir);
 }
 
-fn downloadFile(allocator: std.mem.Allocator, url: []const u8, output_path: []const u8) !void {
-    try http.fetchUrlToFile(allocator, url, &default_request_headers, output_path);
+fn downloadFile(ctx: types.Ctx, url: []const u8, output_path: []const u8) !void {
+    try http.fetchUrlToFile(ctx, url, &default_request_headers, output_path);
 }
 
-fn extractTarball(_: std.mem.Allocator, archive_path: []const u8, output_dir: []const u8, strip_components: u32) !void {
-    const archive = try std.fs.openFileAbsolute(archive_path, .{});
-    defer archive.close();
+fn extractTarball(ctx: types.Ctx, archive_path: []const u8, output_dir: []const u8, strip_components: u32) !void {
+    const archive = try std.Io.Dir.openFileAbsolute(ctx.io, archive_path, .{});
+    defer archive.close(ctx.io);
 
     var archive_buffer: [4096]u8 = undefined;
-    var archive_reader = archive.reader(&archive_buffer);
+    var archive_reader = archive.reader(ctx.io, &archive_buffer);
     var gzip_buffer: [std.compress.flate.max_window_len]u8 = undefined;
     var decompressor = std.compress.flate.Decompress.init(&archive_reader.interface, .gzip, &gzip_buffer);
-    var output_dir_handle = try std.fs.openDirAbsolute(output_dir, .{});
-    defer output_dir_handle.close();
+    var output_dir_handle = try std.Io.Dir.openDirAbsolute(ctx.io, output_dir, .{});
+    defer output_dir_handle.close(ctx.io);
 
-    try std.tar.pipeToFileSystem(output_dir_handle, &decompressor.reader, .{
+    try std.tar.extract(ctx.io, output_dir_handle, &decompressor.reader, .{
         .strip_components = strip_components,
     });
 }
 
-fn findExtractedBinary(allocator: std.mem.Allocator, extract_dir: []const u8) ![]const u8 {
-    const direct_path = try std.fs.path.join(allocator, &.{ extract_dir, "pmm3" });
-    const direct_file = std.fs.openFileAbsolute(direct_path, .{}) catch |err| switch (err) {
+fn findExtractedBinary(ctx: types.Ctx, extract_dir: []const u8) ![]const u8 {
+    const direct_path = try std.fs.path.join(ctx.allocator, &.{ extract_dir, "pmm3" });
+    const direct_file = std.Io.Dir.openFileAbsolute(ctx.io, direct_path, .{}) catch |err| switch (err) {
         error.FileNotFound => null,
         else => return err,
     };
     if (direct_file) |file| {
-        file.close();
+        file.close(ctx.io);
         return direct_path;
     }
-    allocator.free(direct_path);
+    ctx.allocator.free(direct_path);
 
-    var extract_handle = try std.fs.openDirAbsolute(extract_dir, .{ .iterate = true });
-    defer extract_handle.close();
+    var extract_handle = try std.Io.Dir.openDirAbsolute(ctx.io, extract_dir, .{ .iterate = true });
+    defer extract_handle.close(ctx.io);
 
-    var walker = try extract_handle.walk(allocator);
+    var walker = try extract_handle.walk(ctx.allocator);
     defer walker.deinit();
 
-    while (try walker.next()) |entry| {
+    while (try walker.next(ctx.io)) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.eql(u8, entry.basename, "pmm3")) continue;
-        return try std.fs.path.join(allocator, &.{ extract_dir, entry.path });
+        return try std.fs.path.join(ctx.allocator, &.{ extract_dir, entry.path });
     }
 
     return error.FileNotFound;
 }
 
-fn replaceInstalledBinary(allocator: std.mem.Allocator, source_path: []const u8, installed_path: []const u8) !void {
+fn replaceInstalledBinary(ctx: types.Ctx, source_path: []const u8, installed_path: []const u8) !void {
     const bin_dir = std.fs.path.dirname(installed_path) orelse return error.InvalidPath;
-    const staged_path = try std.fs.path.join(allocator, &.{ bin_dir, "pmm3.new" });
+    const staged_path = try std.fs.path.join(ctx.allocator, &.{ bin_dir, "pmm3.new" });
 
-    try paths.makePathAbsolute(allocator, bin_dir);
-    try copyExecutable(source_path, staged_path);
-    std.fs.renameAbsolute(staged_path, installed_path) catch |err| switch (err) {
-        error.PathAlreadyExists => {
-            try std.fs.deleteFileAbsolute(installed_path);
-            try std.fs.renameAbsolute(staged_path, installed_path);
+    try paths.makePathAbsolute(ctx, bin_dir);
+    try copyExecutable(ctx, source_path, staged_path);
+    std.Io.Dir.renameAbsolute(staged_path, installed_path, ctx.io) catch |err| switch (err) {
+        error.FileNotFound => {
+            try std.Io.Dir.deleteFileAbsolute(ctx.io, installed_path);
+            try std.Io.Dir.renameAbsolute(staged_path, installed_path, ctx.io);
         },
         else => return err,
     };
 }
 
-fn copyExecutable(source_path: []const u8, target_path: []const u8) !void {
-    const source = try std.fs.openFileAbsolute(source_path, .{});
-    defer source.close();
+fn copyExecutable(ctx: types.Ctx, source_path: []const u8, target_path: []const u8) !void {
+    const source = try std.Io.Dir.openFileAbsolute(ctx.io, source_path, .{});
+    defer source.close(ctx.io);
 
-    const target = try std.fs.createFileAbsolute(target_path, .{ .truncate = true, .read = true, .mode = 0o755 });
-    defer target.close();
+    const target = try std.Io.Dir.createFileAbsolute(ctx.io, target_path, .{ .truncate = true, .read = true, .permissions = .executable_file });
+    defer target.close(ctx.io);
 
-    var buffer: [8192]u8 = undefined;
+    var source_reader = source.reader(ctx.io, &.{});
+    var buf: [8192]u8 = undefined;
     while (true) {
-        const bytes_read = try source.read(&buffer);
+        const bytes_read = try source_reader.interface.readSliceShort(&buf);
         if (bytes_read == 0) break;
-        try target.writeAll(buffer[0..bytes_read]);
+        try target.writeStreamingAll(ctx.io, buf[0..bytes_read]);
     }
 
-    try target.chmod(0o755);
+    try target.setPermissions(ctx.io, std.Io.File.Permissions.fromMode(0o755));
 }
 
-fn runInstalledSetup(allocator: std.mem.Allocator, installed_binary: []const u8) !void {
+fn runInstalledSetup(ctx: types.Ctx, installed_binary: []const u8) !void {
     logging.info("Running setup with {s}", .{installed_binary});
 
-    var child = std.process.Child.init(&.{ installed_binary, "setup" }, allocator);
-    child.stdin_behavior = .Inherit;
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
+    var child = try std.process.spawn(ctx.io, .{
+        .argv = &.{ installed_binary, "setup" },
+        .stdin = .inherit,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    });
 
-    const term = try child.spawnAndWait();
+    const term = try child.wait(ctx.io);
     if (!process_utils.termSucceeded(term)) process_utils.exitForTerm(term);
 }
 
@@ -632,6 +642,7 @@ test "compare versions orders semver values" {
 }
 
 test "fetchLatestPmmRelease selection prefers highest semver release" {
+    const as = std.testing.allocator;
     const asset_name = "pmm3-linux-x64.tar.gz";
     const releases = [_]GitHubRelease{
         .{
@@ -657,11 +668,11 @@ test "fetchLatestPmmRelease selection prefers highest semver release" {
         },
     };
 
-    const selected = try selectLatestRelease(std.testing.allocator, &releases, asset_name);
+    const selected = try selectLatestRelease(as, &releases, asset_name);
     defer {
-        std.testing.allocator.free(selected.version);
-        std.testing.allocator.free(selected.asset_name);
-        std.testing.allocator.free(selected.download_url);
+        as.free(selected.version);
+        as.free(selected.asset_name);
+        as.free(selected.download_url);
     }
 
     try std.testing.expectEqualStrings("1.2.4-alpha.2", selected.version);
@@ -669,6 +680,7 @@ test "fetchLatestPmmRelease selection prefers highest semver release" {
 }
 
 test "fetchLatestPmmRelease selection prefers stable over same core prerelease" {
+    const as = std.testing.allocator;
     const asset_name = "pmm3-linux-x64.tar.gz";
     const releases = [_]GitHubRelease{
         .{
@@ -687,17 +699,18 @@ test "fetchLatestPmmRelease selection prefers stable over same core prerelease" 
         },
     };
 
-    const selected = try selectLatestRelease(std.testing.allocator, &releases, asset_name);
+    const selected = try selectLatestRelease(as, &releases, asset_name);
     defer {
-        std.testing.allocator.free(selected.version);
-        std.testing.allocator.free(selected.asset_name);
-        std.testing.allocator.free(selected.download_url);
+        as.free(selected.version);
+        as.free(selected.asset_name);
+        as.free(selected.download_url);
     }
 
     try std.testing.expectEqualStrings("1.2.4", selected.version);
 }
 
 test "fetchLatestPmmRelease selection skips drafts and missing assets" {
+    const as = std.testing.allocator;
     const asset_name = "pmm3-linux-x64.tar.gz";
     const releases = [_]GitHubRelease{
         .{
@@ -724,57 +737,57 @@ test "fetchLatestPmmRelease selection skips drafts and missing assets" {
         },
     };
 
-    const selected = try selectLatestRelease(std.testing.allocator, &releases, asset_name);
+    const selected = try selectLatestRelease(as, &releases, asset_name);
     defer {
-        std.testing.allocator.free(selected.version);
-        std.testing.allocator.free(selected.asset_name);
-        std.testing.allocator.free(selected.download_url);
+        as.free(selected.version);
+        as.free(selected.asset_name);
+        as.free(selected.download_url);
     }
 
     try std.testing.expectEqualStrings("1.2.3", selected.version);
 }
 
 fn installPackageManager(
-    allocator: std.mem.Allocator,
+    ctx: types.Ctx,
     package_spec: types.PackageManagerSpec,
     skip_cache: bool,
 ) !bool {
     if (spec.isNativePackageManager(package_spec.name)) {
-        return bun.installPackageManager(allocator, package_spec, skip_cache);
+        return bun.installPackageManager(ctx, package_spec, skip_cache);
     }
 
-    const install_path = try paths.getInstallPath(allocator, package_spec);
-    const temp_dir = try createTempDir(allocator);
-    defer cleanupTempDir(allocator, temp_dir);
+    const install_path = try paths.getInstallPath(ctx, package_spec);
+    const temp_dir = try createTempDir(ctx);
+    defer cleanupTempDir(ctx, temp_dir);
 
-    const package_json_path = try paths.getInstallPackageJsonPath(allocator, package_spec);
+    const package_json_path = try paths.getInstallPackageJsonPath(ctx, package_spec);
 
-    if (!skip_cache and (try paths.readFileIfPresent(allocator, package_json_path)) != null) {
+    if (!skip_cache and (try paths.readFileIfPresent(ctx, package_json_path)) != null) {
         return true;
     }
 
     const resolved_version = try spec.getVersionCore(package_spec.version);
     const package_source = try resolvePackageSource(package_spec.name, package_spec.version);
     const tarball_url = try std.fmt.allocPrint(
-        allocator,
+        ctx.allocator,
         "{s}/{s}/-/{s}-{s}.tgz",
         .{
-            try paths.getRegistry(allocator),
+            try paths.getRegistry(ctx),
             package_source.registry_package_name,
             package_source.tarball_package_name,
             resolved_version,
         },
     );
-    const archive_path = try std.fs.path.join(allocator, &.{ temp_dir, "package.tgz" });
+    const archive_path = try std.fs.path.join(ctx.allocator, &.{ temp_dir, "package.tgz" });
 
     logging.friendly("Installing {s}@{s}", .{ package_spec.name, package_spec.version });
 
-    try paths.removeTreeAbsoluteIfPresent(allocator, install_path);
-    try paths.makePathAbsolute(allocator, install_path);
-    try downloadFile(allocator, tarball_url, archive_path);
-    try extractTarball(allocator, archive_path, install_path, 1);
+    paths.removeTreeAbsoluteIfPresent(ctx, install_path);
+    try paths.makePathAbsolute(ctx, install_path);
+    try downloadFile(ctx, tarball_url, archive_path);
+    try extractTarball(ctx, archive_path, install_path, 1);
 
-    if ((try paths.readFileIfPresent(allocator, package_json_path)) == null) {
+    if ((try paths.readFileIfPresent(ctx, package_json_path)) == null) {
         return error.CommandFailed;
     }
 
@@ -815,8 +828,9 @@ test "resolvePackageSource uses cli-dist for yarn 2 plus with sha suffix" {
 }
 
 test "encodePackageNameForRegistryPath escapes scoped packages" {
-    const encoded = try encodePackageNameForRegistryPath(std.testing.allocator, "@yarnpkg/cli-dist");
-    defer if (!std.mem.eql(u8, encoded, "@yarnpkg/cli-dist")) std.testing.allocator.free(encoded);
+    const as = std.testing.allocator;
+    const encoded = try encodePackageNameForRegistryPath(as, "@yarnpkg/cli-dist");
+    defer if (!std.mem.eql(u8, encoded, "@yarnpkg/cli-dist")) as.free(encoded);
 
     try std.testing.expectEqualStrings("@yarnpkg%2Fcli-dist", encoded);
 }
@@ -825,35 +839,42 @@ test "findExtractedBinary walks nested directories" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("nested/bin");
-    const file = try tmp.dir.createFile("nested/bin/pmm3", .{});
-    file.close();
+    try tmp.dir.createDirPath(std.testing.io, "nested/bin");
+    const file = try tmp.dir.createFile(std.testing.io, "nested/bin/pmm3", .{});
+    file.close(std.testing.io);
 
-    const absolute_tmp = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
-    defer std.testing.allocator.free(absolute_tmp);
+    const as = std.testing.allocator;
+    const absolute_tmp = try tmp.dir.realPathFileAlloc(std.testing.io, ".", as);
+    defer as.free(absolute_tmp);
 
-    const found = try findExtractedBinary(std.testing.allocator, absolute_tmp);
-    defer std.testing.allocator.free(found);
+    const test_ctx = types.Ctx{
+        .allocator = as,
+        .io = std.testing.io,
+        .environ = undefined,
+    };
 
-    const expected = try std.fs.path.join(std.testing.allocator, &.{ absolute_tmp, "nested/bin/pmm3" });
-    defer std.testing.allocator.free(expected);
+    const found = try findExtractedBinary(test_ctx, absolute_tmp);
+    defer as.free(found);
+
+    const expected = try std.fs.path.join(as, &.{ absolute_tmp, "nested/bin/pmm3" });
+    defer as.free(expected);
 
     try std.testing.expectEqualStrings(expected, found);
 }
 
 fn getExecutablePath(
-    allocator: std.mem.Allocator,
+    ctx: types.Ctx,
     package_spec: types.PackageManagerSpec,
     executable_name: []const u8,
 ) ![]const u8 {
     if (spec.isNativePackageManager(package_spec.name)) {
-        return try bun.getExecutablePath(allocator, package_spec, executable_name);
+        return try bun.getExecutablePath(ctx, package_spec, executable_name);
     }
 
-    const package_json_path = try paths.getInstallPackageJsonPath(allocator, package_spec);
-    const relative_path = (try package_json.readPackageExecutablePath(allocator, package_json_path, executable_name)) orelse {
+    const package_json_path = try paths.getInstallPackageJsonPath(ctx, package_spec);
+    const relative_path = (try package_json.readPackageExecutablePath(ctx, package_json_path, executable_name)) orelse {
         return error.CommandFailed;
     };
-    const install_path = try paths.getInstallPath(allocator, package_spec);
-    return try std.fs.path.join(allocator, &.{ install_path, relative_path });
+    const install_path = try paths.getInstallPath(ctx, package_spec);
+    return try std.fs.path.join(ctx.allocator, &.{ install_path, relative_path });
 }
