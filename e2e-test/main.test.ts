@@ -288,6 +288,7 @@ describe('setup and usage', () => {
       const testProject = await setupTestProject({});
       result = await human(`npx -y cowsay@1.5.0 How good is pmm!`, {
         cwd: testProject.projectPath,
+        stdOutOnly: true,
       });
     });
 
