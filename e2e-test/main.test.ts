@@ -1,10 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
-import { ShellError, TEST_HOME, callAndCatch, cleanup, human, loadPackageJson, setupTestProject, type TestProject } from './helpers';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { ShellError, TEST_HOME, PMM_BIN_PATH, callAndCatch, cleanup, human, loadPackageJson, setupTestProject, type TestProject } from './helpers';
 
 const VERSION_RX = /(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)/;
 const SPEC_RX =
-  /(?<name>(pnpm|npm|yarn))@(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)/;
+  /(?<name>(npm|yarn))@(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)/;
 
 setDefaultTimeout(30_000)
 
@@ -28,15 +30,22 @@ describe('setup and usage', () => {
   });
 
   it("installs shims to path", async () => {
-    for (const shim of ['yarn', 'pnpm', 'pnpx', 'npm', 'npx']) {
+    for (const shim of ['yarn', 'npm', 'npx', 'bun', 'bunx']) {
       expect((await human(`which ${shim}`))).toStartWith(TEST_HOME)
     }
+  });
+
+  it("prunes stale pnpm shims", async () => {
+    const pnpmPath = path.resolve(PMM_BIN_PATH, 'pnpm');
+    await fs.symlink(path.resolve(PMM_BIN_PATH, 'pmm3'), pnpmPath);
+    await human('zig-out/bin/pmm3 setup', { skipRc: true });
+    await expect(fs.lstat(pnpmPath)).rejects.toThrow();
   });
 
   describe('running shims', () => {
     it('runs default version when packageManager field is not set', async () => {
       const packageManagers = [
-        'npm', 'yarn', 'pnpm'
+        'npm', 'yarn'
       ]
       await Promise.all(packageManagers.map(async (pm) => {
         const testProject = await setupTestProject({
@@ -52,7 +61,6 @@ describe('setup and usage', () => {
 
     it('runs the specified package manager version based on packageManager field', async () => {
       const versions = [
-        { name: 'pnpm', version: '6.32.9' },
         { name: 'npm', version: '6.14.16' },
         { name: 'yarn', version: '1.10.1' },
       ];
@@ -159,9 +167,6 @@ describe('setup and usage', () => {
     it('updates the default packageManagers', async () => {
       expect(output).toMatch('🎁  Updating all package managers');
       expect(output).toMatch(
-        new RegExp(`🎁  Setting pnpm default to version ${VERSION_RX.source}`)
-      );
-      expect(output).toMatch(
         new RegExp(`🎁  Setting npm default to version ${VERSION_RX.source}`)
       );
       expect(output).toMatch(
@@ -179,7 +184,7 @@ describe('setup and usage', () => {
 
       beforeAll(async () => {
         testProject = await setupTestProject({ subDir: 'not-configured' });
-        result = await human(`pmm3 pin pnpm .`, {
+        result = await human(`pmm3 pin npm .`, {
           cwd: testProject.projectPath,
         });
 
@@ -192,7 +197,7 @@ describe('setup and usage', () => {
       it('writes success message', () => {
         const messageRx = new RegExp(`🎁  Pinned ${SPEC_RX.source}`);
         expect(result).toMatch(messageRx);
-        expect(messageRx.exec(result)?.groups?.name).toBe('pnpm');
+        expect(messageRx.exec(result)?.groups?.name).toBe('npm');
         expect(
           Number(messageRx.exec(result)?.groups?.major)
         ).toBeGreaterThanOrEqual(7);
@@ -215,7 +220,7 @@ describe('setup and usage', () => {
         const rx = new RegExp(`^${SPEC_RX.source}$`);
         const match = rx.exec(packageManager)!;
 
-        expect(match.groups?.name).toBe('pnpm');
+        expect(match.groups?.name).toBe('npm');
         expect(Number(match.groups?.major)).toBeGreaterThanOrEqual(7);
       });
 
@@ -237,7 +242,7 @@ describe('setup and usage', () => {
       beforeAll(async () => {
         testProject = await setupTestProject({ subDir: 'not-configured' });
         error = await callAndCatch(() =>
-          human(`pmm3 pin pnpm ./some-random-subpath`, {
+          human(`pmm3 pin npm ./some-random-subpath`, {
             cwd: testProject.projectPath,
           })
         );
@@ -301,73 +306,31 @@ describe('setup and usage', () => {
     });
   });
 
-  describe('pnpx', () => {
-    let result: string;
-
+  describe('removed pnpm shims', () => {
     beforeAll(async () => {
-      const testProject = await setupTestProject({});
-      result = await human(`pnpx cowsay@1.5.0 How good is pmm!`, {
-        cwd: testProject.projectPath,
-        stdOutOnly: true
-      });
+      const pmm3Path = path.resolve(PMM_BIN_PATH, 'pmm3');
+      await fs.symlink(pmm3Path, path.resolve(PMM_BIN_PATH, 'pnpm'));
+      await fs.symlink(pmm3Path, path.resolve(PMM_BIN_PATH, 'pnpx'));
     });
 
-    it('runs the cowsay cli', () => {
-      expect(result).toMatchInlineSnapshot(`
-        " __________________
-        < How good is pmm! >
-         ------------------
-                \\   ^__^
-                 \\  (oo)\\_______
-                    (__)\\       )\\/\\
-                        ||----w |
-                        ||     ||
-        "
-      `);
+    it('prints an error and exits non-zero when the pnpm shim is executed', async () => {
+      const error = await callAndCatch(() => human(`pnpm -v`, { cwd: process.cwd() }));
+      expect(error.exitCode).toEqual(1);
+      expect(stripVTControlCharacters(error.output.trim())).toContain(
+        'pnpm is no longer managed by pmm3'
+      );
+    });
+
+    it('prints an error and exits non-zero when the pnpx shim is executed', async () => {
+      const error = await callAndCatch(() => human(`pnpx -v`, { cwd: process.cwd() }));
+      expect(error.exitCode).toEqual(1);
+      expect(stripVTControlCharacters(error.output.trim())).toContain(
+        'pnpm is no longer managed by pmm3'
+      );
     });
   });
 
   describe('shims with allow_spec_mismatch ignore spec mismatch', () => {
-    describe('npx in a pnpm project', () => {
-      let result: string;
-
-      beforeAll(async () => {
-        const testProject = await setupTestProject({
-          subDir: 'allow-spec-mismatch/npx-in-pnpm',
-          packageManager: 'pnpm@9.15.4',
-        });
-        result = await human(`npx -y cowsay@1.5.0 How good is pmm!`, {
-          cwd: testProject.projectPath,
-          stdOutOnly: true,
-        });
-      });
-
-      it('runs cowsay without a spec-mismatch error', () => {
-        expect(result).toMatch('How good is pmm!');
-        expect(result).toMatch('(oo)');
-      });
-    });
-
-    describe('pnpx in a npm project', () => {
-      let result: string;
-
-      beforeAll(async () => {
-        const testProject = await setupTestProject({
-          subDir: 'allow-spec-mismatch/pnpx-in-npm',
-          packageManager: 'npm@6.14.16',
-        });
-        result = await human(`pnpx -y cowsay@1.5.0 How good is pmm!`, {
-          cwd: testProject.projectPath,
-          stdOutOnly: true,
-        });
-      });
-
-      it('runs cowsay without a spec-mismatch error', () => {
-        expect(result).toMatch('How good is pmm!');
-        expect(result).toMatch('(oo)');
-      });
-    });
-
     describe('npx in a yarn project', () => {
       let result: string;
 
@@ -415,13 +378,13 @@ describe('setup and usage', () => {
 
     beforeAll(async () => {
       const testProject = await setupTestProject({
-        packageManager: 'pnpm@7.5.1',
+        packageManager: 'npm@6.14.16',
         scripts: {
           'get-npm-version': 'npm --version',
         },
       });
 
-      result = await human(`pnpm run get-npm-version`, {
+      result = await human(`npm run get-npm-version`, {
         cwd: testProject.projectPath,
         stdOutOnly: true
       });
@@ -437,13 +400,13 @@ describe('setup and usage', () => {
 
     beforeAll(async () => {
       const testProject = await setupTestProject({
-        packageManager: 'pnpm@7.5.1',
+        packageManager: 'npm@6.14.16',
         scripts: {
           'script-with-exit-code': 'exit 1',
         },
       });
 
-      error = await callAndCatch(() => human(`pnpm run script-with-exit-code`, {
+      error = await callAndCatch(() => human(`npm run script-with-exit-code`, {
         cwd: testProject.projectPath,
       }))
 

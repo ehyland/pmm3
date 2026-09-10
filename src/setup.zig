@@ -3,7 +3,8 @@ const logging = @import("logging.zig");
 const paths = @import("paths.zig");
 const types = @import("types.zig");
 
-const shim_names = [_][]const u8{ "npm", "npx", "pnpm", "pnpx", "yarn", "bun", "bunx" };
+const shim_names = [_][]const u8{ "npm", "npx", "yarn", "bun", "bunx" };
+const removed_shim_names = [_][]const u8{ "pnpm", "pnpx" };
 
 pub fn run(ctx: types.Ctx, custom_rc_path: ?[]const u8) !void {
     const self_exe = try std.process.executablePathAlloc(ctx.io, ctx.allocator);
@@ -14,6 +15,8 @@ pub fn run(ctx: types.Ctx, custom_rc_path: ?[]const u8) !void {
     try paths.makePathAbsolute(ctx, bin_dir);
     try installBinary(ctx, self_exe, pmm_target);
     try ensureShims(ctx, bin_dir, pmm_target);
+    try pruneRemovedShims(ctx, bin_dir);
+    try pruneRemovedPackageManager(ctx, pmm_home);
     try ensureBashrcHook(ctx, pmm_home, custom_rc_path);
 
     logging.friendly("Setup complete", .{});
@@ -51,6 +54,54 @@ fn ensureShims(ctx: types.Ctx, bin_dir: []const u8, pmm_target: []const u8) !voi
         };
 
         try std.Io.Dir.symLinkAbsolute(ctx.io, pmm_target, shim_path, .{});
+    }
+}
+
+fn pruneRemovedShims(ctx: types.Ctx, bin_dir: []const u8) !void {
+    for (removed_shim_names) |name| {
+        const shim_path = try std.fs.path.join(ctx.allocator, &.{ bin_dir, name });
+        std.Io.Dir.deleteFileAbsolute(ctx.io, shim_path) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
+    }
+}
+
+fn pruneRemovedPackageManager(ctx: types.Ctx, pmm_home: []const u8) !void {
+    const installed_dir = try std.fs.path.join(ctx.allocator, &.{ pmm_home, "installed-versions" });
+    const default_path = try std.fs.path.join(ctx.allocator, &.{ installed_dir, ".defaults", "pnpm-version" });
+
+    var removed = false;
+
+    const dir_handle = std.Io.Dir.openDirAbsolute(ctx.io, installed_dir, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer dir_handle.close(ctx.io);
+
+    var walker = try dir_handle.walk(ctx.allocator);
+    defer walker.deinit();
+
+    while (try walker.next(ctx.io)) |entry| {
+        if (std.mem.indexOfScalar(u8, entry.path, '/') != null) continue;
+        if (std.mem.startsWith(u8, entry.basename, "pnpm-")) {
+            const entry_path = try std.fs.path.join(ctx.allocator, &.{ installed_dir, entry.path });
+            std.Io.Dir.cwd().deleteTree(ctx.io, entry_path) catch {};
+            removed = true;
+        }
+    }
+
+    if (std.Io.Dir.openFileAbsolute(ctx.io, default_path, .{})) |default_file| {
+        default_file.close(ctx.io);
+        try std.Io.Dir.deleteFileAbsolute(ctx.io, default_path);
+        removed = true;
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    }
+
+    if (removed) {
+        logging.info("Removed cached pnpm data", .{});
     }
 }
 

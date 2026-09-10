@@ -5,7 +5,7 @@ This workspace recreates the core behavior of [ehyland/pmm](https://github.com/e
 The binary behaves as both:
 
 - `pmm3`, the management CLI
-- `npm`, `npx`, `pnpm`, `pnpx`, and `yarn`, via shim symlinks
+- `npm`, `npx`, `yarn`, `bun`, and `bunx`, via shim symlinks
 
 Like the original project, it:
 
@@ -30,9 +30,9 @@ Implemented shims:
 
 - `npm`
 - `npx`
-- `pnpm`
-- `pnpx`
 - `yarn`
+- `bun`
+- `bunx`
 
 ## Requirements
 
@@ -70,7 +70,7 @@ You can also run setup directly from the binary:
 The setup command:
 
 - installs the current `pmm3` binary into `$PMM3_HOME/bin/pmm3`
-- creates or refreshes shim links for `npm`, `npx`, `pnpm`, `pnpx`, and `yarn` in `$PMM3_HOME/bin`
+- creates or refreshes shim links for `npm`, `npx`, `yarn`, `bun`, and `bunx` in `$PMM3_HOME/bin`
 - appends a `pmm3` shell hook to `~/.bashrc` if one is not already present
 
 The shell hook added to `~/.bashrc` ensures `PMM3_HOME` defaults to `~/.pmm3` and that `$PMM3_HOME/bin` is present in `PATH`.

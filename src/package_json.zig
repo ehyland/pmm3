@@ -10,9 +10,13 @@ pub fn findPackageManagerSpec(ctx: types.Ctx) !?types.FoundSpec {
         const package_json_path = try std.fs.path.join(ctx.allocator, &.{ current, "package.json" });
 
         if (try readPackageManagerField(ctx, package_json_path)) |field| {
+            const parsed = spec.parseSpecString(field) catch |err| switch (err) {
+                error.UnsupportedPackageManager => return null,
+                else => return err,
+            };
             return .{
                 .package_json_path = package_json_path,
-                .spec = try spec.parseSpecString(field),
+                .spec = parsed,
             };
         }
 

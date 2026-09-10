@@ -12,7 +12,7 @@ pub fn printUsage() void {
         \\  pmm3 pin <package-manager> <path-to-package>
         \\
         \\Shims:
-        \\  npm, npx, pnpm, pnpx, yarn
+        \\  npm, npx, yarn, bun, bunx
         \\
     ;
 

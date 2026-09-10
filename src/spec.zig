@@ -1,7 +1,7 @@
 const std = @import("std");
 const types = @import("types.zig");
 
-pub const supported_package_managers = [_][]const u8{ "pnpm", "npm", "yarn", "bun" };
+pub const supported_package_managers = [_][]const u8{ "npm", "yarn", "bun" };
 
 pub const Version = struct {
     major: u32,

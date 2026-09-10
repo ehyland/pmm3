@@ -260,6 +260,11 @@ fn runPackageManager(
     shim: types.Shim,
     argv: []const []const u8,
 ) !void {
+    if (std.mem.eql(u8, shim.package_manager_name, "pnpm")) {
+        logging.userError("pnpm is no longer managed by pmm3. pnpm is now self-managing — install pnpm directly (it manages its own versions).");
+        std.process.exit(1);
+    }
+
     var found = try package_json.findPackageManagerSpec(ctx);
 
     if (found) |*configured| {
