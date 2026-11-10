@@ -3,7 +3,7 @@
 set -euo pipefail
 
 REPOSITORY="ehyland/pmm3"
-LATEST_RELEASE_API_URL="https://api.github.com/repos/${REPOSITORY}/releases/latest"
+DOWNLOAD_BASE_URL="https://github.com/${REPOSITORY}/releases/latest/download"
 PMM3_HOME="${PMM3_HOME:-$HOME/.pmm3}"
 PMM_BIN_DIR="$PMM3_HOME/bin"
 TMP_DIR="$(mktemp -d)"
@@ -24,10 +24,10 @@ require_command() {
 detect_os() {
   case "$(uname -s)" in
     Darwin)
-      echo "Darwin"
+      echo "darwin"
       ;;
     Linux)
-      echo "Linux"
+      echo "linux"
       ;;
     *)
       echo "Unsupported operating system: $(uname -s)" >&2
@@ -55,45 +55,21 @@ find_extracted_binary() {
   find "$1" -type f -name pmm3 | head -n 1
 }
 
-resolve_release_info() {
-  RELEASE_JSON=$(curl -fsSL \
-    -H "Accept: application/vnd.github+json" \
-    -H "User-Agent: pmm3-installer" \
-    "$LATEST_RELEASE_API_URL")
-
-  LATEST_TAG=$(RELEASE_JSON="$RELEASE_JSON" node -e '
-    try {
-      const release = JSON.parse(process.env.RELEASE_JSON || "{}");
-      if (release.tag_name) process.stdout.write(release.tag_name);
-    } catch (e) {}
-  ' 2>/dev/null)
-
-  if [[ -z "$LATEST_TAG" ]]; then
-    echo "Unable to find the latest release tag" >&2
-    exit 1
-  fi
-
-  echo "$LATEST_TAG"
-}
-
 require_command curl
 require_command tar
 require_command mktemp
 require_command find
-require_command node
 
 OS="$(detect_os)"
 ARCH="$(detect_arch)"
-RELEASE_VERSION="$(resolve_release_info)"
 ASSET_NAME="pmm3-${OS}-${ARCH}.tar.gz"
-DOWNLOAD_URL="https://github.com/${REPOSITORY}/releases/download/${RELEASE_VERSION}/${ASSET_NAME}"
+DOWNLOAD_URL="${DOWNLOAD_BASE_URL}/${ASSET_NAME}"
 ARCHIVE_PATH="$TMP_DIR/$ASSET_NAME"
 EXTRACT_DIR="$TMP_DIR/extract"
 
 mkdir -p "$PMM_BIN_DIR" "$EXTRACT_DIR"
 
 echo "Installing pmm3"
-echo "Selected release $RELEASE_VERSION"
 echo "Downloading $ASSET_NAME"
 
 curl -fsSL "$DOWNLOAD_URL" -o "$ARCHIVE_PATH"
